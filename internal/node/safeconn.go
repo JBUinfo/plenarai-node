@@ -13,7 +13,12 @@ type SafeConn struct {
 	mu   sync.Mutex
 }
 
+// maxWebSocketMessageSize bounds relay frames while leaving room for the
+// encrypted score batches used by the node protocol.
+const maxWebSocketMessageSize int64 = 8 << 20
+
 func NewSafeConn(c *websocket.Conn) *SafeConn {
+	setReadLimit(c)
 	return &SafeConn{conn: c}
 }
 
@@ -22,6 +27,7 @@ func NewSafeConn(c *websocket.Conn) *SafeConn {
 func (s *SafeConn) Swap(c *websocket.Conn) *websocket.Conn {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	setReadLimit(c)
 	old := s.conn
 	s.conn = c
 	return old
@@ -43,4 +49,10 @@ func (s *SafeConn) ReadMessage() (int, []byte, error) {
 
 func (s *SafeConn) Close() error {
 	return s.conn.Close()
+}
+
+func setReadLimit(c *websocket.Conn) {
+	if c != nil {
+		c.SetReadLimit(maxWebSocketMessageSize)
+	}
 }

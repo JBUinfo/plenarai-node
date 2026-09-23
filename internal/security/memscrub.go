@@ -7,29 +7,48 @@ import (
 )
 
 var (
-	sensitiveBuffers [][]byte
+	sensitiveBuffers = make(map[uint64][]byte)
+	nextBufferID     uint64
 	mu               sync.Mutex
 )
 
 // TrackSensitiveBuffer registers a byte slice for periodic zeroing.
-// Call this for any buffer containing decrypted content.
-func TrackSensitiveBuffer(buf []byte) {
+// Call the returned cleanup function as soon as the buffer is no longer needed.
+func TrackSensitiveBuffer(buf []byte) func() {
 	mu.Lock()
-	defer mu.Unlock()
-	sensitiveBuffers = append(sensitiveBuffers, buf)
+	nextBufferID++
+	id := nextBufferID
+	sensitiveBuffers[id] = buf
+	mu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			mu.Lock()
+			defer mu.Unlock()
+			if tracked, ok := sensitiveBuffers[id]; ok {
+				zeroBytes(tracked)
+				delete(sensitiveBuffers, id)
+			}
+		})
+	}
 }
 
 // ScrubAll zeros all tracked sensitive buffers and releases them.
 func ScrubAll() {
 	mu.Lock()
 	defer mu.Unlock()
-	for _, buf := range sensitiveBuffers {
-		for i := range buf {
-			buf[i] = 0
-		}
+	for id, buf := range sensitiveBuffers {
+		zeroBytes(buf)
+		delete(sensitiveBuffers, id)
 	}
-	sensitiveBuffers = nil
 	runtime.GC() // encourage garbage collection of zeroed data
+}
+
+func zeroBytes(buf []byte) {
+	for i := range buf {
+		buf[i] = 0
+	}
 }
 
 // StartPeriodicScrub runs ScrubAll every interval as a safety net.

@@ -7,6 +7,7 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // PinnedVersion is the llama.cpp release this CLI build expects. Bump it (and
@@ -62,6 +64,17 @@ const DefaultModelURL = "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/re
 
 // DefaultModelName is the identifier reported to the backend for the default model.
 const DefaultModelName = "qwen2.5-3b-instruct-q4_k_m"
+
+const (
+	// modelDownloadTimeout bounds a model transfer, including response-body
+	// reads. The generous duration accommodates large GGUF files on slow links.
+	modelDownloadTimeout = 30 * time.Minute
+	// maxModelDownloadSize prevents a model endpoint from filling the config
+	// volume with an unbounded response. GGUF files remain well below this cap.
+	maxModelDownloadSize int64 = 64 << 30
+)
+
+var modelDownloadClient = &http.Client{Timeout: modelDownloadTimeout}
 
 // ServerPath returns the expected llama-server location inside binDir.
 func ServerPath(binDir string) string {
@@ -301,8 +314,14 @@ func DownloadModel(url, dest string) error {
 	return os.Rename(tmp, dest)
 }
 
-func httpDownload(url, dest string) error {
-	resp, err := http.Get(url)
+func httpDownload(url, dest string) (retErr error) {
+	ctx, cancel := context.WithTimeout(context.Background(), modelDownloadTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := modelDownloadClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -310,21 +329,33 @@ func httpDownload(url, dest string) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("GET %s returned status %d", url, resp.StatusCode)
 	}
+	if resp.ContentLength > maxModelDownloadSize {
+		return fmt.Errorf("GET %s exceeds the %d-byte model limit", url, maxModelDownloadSize)
+	}
 	out, err := os.Create(dest)
 	if err != nil {
 		return err
 	}
+	defer func() {
+		closeErr := out.Close()
+		if retErr == nil {
+			retErr = closeErr
+		}
+		if retErr != nil {
+			_ = os.Remove(dest)
+		}
+	}()
 
 	var written int64
 	buf := make([]byte, 1<<20)
 	lastPct := -1
 	total := resp.ContentLength
+	limitedBody := io.LimitReader(resp.Body, maxModelDownloadSize+1)
 	for {
-		n, rerr := resp.Body.Read(buf)
+		n, readErr := limitedBody.Read(buf)
 		if n > 0 {
-			if _, werr := out.Write(buf[:n]); werr != nil {
-				out.Close()
-				return werr
+			if _, writeErr := out.Write(buf[:n]); writeErr != nil {
+				return writeErr
 			}
 			written += int64(n)
 			if total > 0 {
@@ -337,14 +368,19 @@ func httpDownload(url, dest string) error {
 				fmt.Printf("  %d MB\r", written/(1<<20))
 			}
 		}
-		if rerr == io.EOF {
+		if readErr == io.EOF {
 			break
 		}
-		if rerr != nil {
-			out.Close()
-			return rerr
+		if readErr != nil {
+			return readErr
 		}
 	}
+	if written > maxModelDownloadSize {
+		return fmt.Errorf("GET %s exceeds the %d-byte model limit", url, maxModelDownloadSize)
+	}
+	if total >= 0 && written != total {
+		return fmt.Errorf("GET %s ended after %d bytes, expected %d", url, written, total)
+	}
 	fmt.Println()
-	return out.Close()
+	return nil
 }

@@ -1,6 +1,6 @@
 # PlenarAI CLI
 
-Command-line client for [PlenarAI](https://plenarai.com): ask questions to a network of independently operated AI nodes, or run your own node and earn credits by answering — or by judging other nodes' answers.
+Command-line client for [PlenarAI](https://plenarai.com): ask questions to a network of independently operated AI nodes, or run your own node and earn credits by answering — or by judging other nodes' answers. This is a beta; credits are not cash payouts.
 
 - **Questioner:** pay credits, several models compete, judge consensus picks the best answer.
 - **Responder:** answer questions with a local model on your own hardware.
@@ -9,7 +9,7 @@ Command-line client for [PlenarAI](https://plenarai.com): ask questions to a net
 
 ## Install
 
-Download a prebuilt binary for your platform from the releases page, then:
+Download a prebuilt binary for your platform from [plenarai.com/download](https://plenarai.com/download), verify it against the published `SHA256SUMS.txt`, then:
 
 ```bash
 chmod +x plenarai-*        # macOS/Linux only
@@ -23,7 +23,7 @@ chmod +x plenarai-*        # macOS/Linux only
 
 ### Build from source
 
-Requires Go 1.23+.
+Requires Go 1.27+.
 
 ```bash
 go build -o plenarai ./cmd/plenarai
@@ -55,8 +55,9 @@ The bundled engine applies the chat template embedded in the model file. Legacy 
 
 - Questions travel encrypted; responder nodes must decrypt them to answer but never learn who asked.
 - Never include personal data or secrets in a question.
-- The engine binds to localhost only; question content never leaves your machine unencrypted.
-- Release binaries are obfuscated and their SHA-256 checksums are published. Verify downloads before running them.
+- The bundled inference engine is configured for localhost. If you opt into Ollama, review its network configuration separately.
+- Nodes decrypt question content to process it; do not send personal data or secrets. Transport and worker-message protections do not make a node confidential hardware.
+- Production download binaries have published SHA-256 checksums. Verify downloads before running them.
 
 ## License
 

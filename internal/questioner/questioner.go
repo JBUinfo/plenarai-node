@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/plenarai/cli/internal/auth"
 	"github.com/plenarai/cli/internal/config"
@@ -46,7 +47,7 @@ func Ask(question, nodeID string) (*AskResponse, error) {
 			Error string `json:"error"`
 		}
 		if json.NewDecoder(resp.Body).Decode(&apiError) == nil && apiError.Error != "" {
-			return nil, fmt.Errorf("%s", apiError.Error)
+			return nil, fmt.Errorf("%s", formatQuestionError(apiError.Error))
 		}
 		return nil, fmt.Errorf("server returned status %d", resp.StatusCode)
 	}
@@ -56,6 +57,13 @@ func Ask(question, nodeID string) (*AskResponse, error) {
 		return nil, err
 	}
 	return &result, nil
+}
+
+func formatQuestionError(message string) string {
+	if strings.EqualFold(strings.TrimSpace(message), "insufficient credits") {
+		return fmt.Sprintf("insufficient credits. Buy more credits at %s", strings.TrimRight(config.ServerURL, "/")+"/wallet")
+	}
+	return message
 }
 
 func PollResult(questionID string) (*QuestionResult, error) {

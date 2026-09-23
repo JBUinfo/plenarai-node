@@ -15,6 +15,9 @@ import (
 
 const DefaultOllamaURL = "http://localhost:11434"
 
+var ollamaProbeClient = &http.Client{Timeout: 3 * time.Second}
+var ollamaPullClient = &http.Client{Timeout: 30 * time.Minute}
+
 // IsOllamaInstalled checks if ollama binary is available in PATH or in common install paths.
 func IsOllamaInstalled() bool {
 	if _, err := exec.LookPath("ollama"); err == nil {
@@ -58,7 +61,7 @@ func IsOllamaRunning(url string) bool {
 	if url == "" {
 		url = DefaultOllamaURL
 	}
-	resp, err := http.Get(url + "/api/tags")
+	resp, err := ollamaProbeClient.Get(url + "/api/tags")
 	if err != nil {
 		return false
 	}
@@ -70,7 +73,7 @@ func IsOllamaRunning(url string) bool {
 func InstallInstructions() string {
 	switch runtime.GOOS {
 	case "linux":
-		return "curl -fsSL https://ollama.com/install.sh | sh"
+		return "Review the installation instructions at https://ollama.com/download/linux"
 	case "darwin":
 		return "Download from https://ollama.com/download/mac\nOr: brew install ollama"
 	case "windows":
@@ -95,8 +98,13 @@ func TryInstall() error {
 }
 
 func installLinux() error {
+	installer, err := verifiedOllamaInstaller("https://ollama.com/install.sh", "plenarai-ollama-*.sh")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(installer)
 	// Run install script with stdin/stdout passthrough (it may prompt for sudo)
-	cmd := exec.Command("sh", "-c", "curl -fsSL https://ollama.com/install.sh | sh")
+	cmd := exec.Command("sh", installer)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -119,25 +127,11 @@ func installLinux() error {
 }
 
 func installWindows() error {
-	tempFile := filepath.Join(os.TempDir(), "OllamaSetup.exe")
-
-	fmt.Println("Downloading Ollama installer (~1.8 GB, may take several minutes)...")
-	resp, err := http.Get("https://ollama.com/download/OllamaSetup.exe")
+	tempFile, err := verifiedOllamaInstaller("https://ollama.com/download/OllamaSetup.exe", "plenarai-ollama-*.exe")
 	if err != nil {
-		return fmt.Errorf("download failed: %w", err)
+		return err
 	}
-	defer resp.Body.Close()
-
-	out, err := os.Create(tempFile)
-	if err != nil {
-		return fmt.Errorf("could not create temp file: %w", err)
-	}
-	pr := NewProgressReader(resp.Body, resp.ContentLength, "Ollama installer")
-	if _, err := io.Copy(out, pr); err != nil {
-		out.Close()
-		return fmt.Errorf("download write failed: %w", err)
-	}
-	out.Close()
+	defer os.Remove(tempFile)
 
 	fmt.Println("Running installer (silent mode)...")
 	cmd := exec.Command(tempFile, "/VERYSILENT", "/NORESTART", "/SUPPRESSMSGBOXES")
@@ -211,7 +205,7 @@ func ListModels(url string) ([]Model, error) {
 	if url == "" {
 		url = DefaultOllamaURL
 	}
-	resp, err := http.Get(url + "/api/tags")
+	resp, err := ollamaProbeClient.Get(url + "/api/tags")
 	if err != nil {
 		return nil, err
 	}
@@ -220,7 +214,10 @@ func ListModels(url string) ([]Model, error) {
 	var result struct {
 		Models []Model `json:"models"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Ollama returned status %d", resp.StatusCode)
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&result); err != nil {
 		return nil, err
 	}
 	return result.Models, nil
@@ -231,8 +228,12 @@ func PullModel(url, modelName string) error {
 	if url == "" {
 		url = DefaultOllamaURL
 	}
-	body := strings.NewReader(fmt.Sprintf(`{"name":"%s","stream":true}`, modelName))
-	resp, err := http.Post(url+"/api/pull", "application/json", body)
+	payload, err := json.Marshal(map[string]interface{}{"name": modelName, "stream": true})
+	if err != nil {
+		return err
+	}
+	body := strings.NewReader(string(payload))
+	resp, err := ollamaPullClient.Post(url+"/api/pull", "application/json", body)
 	if err != nil {
 		return err
 	}
@@ -307,10 +308,10 @@ func PullModel(url, modelName string) error {
 // SuggestedModels returns a curated list of models good for PlenarAI nodes.
 func SuggestedModels() []string {
 	return []string{
-		"llama3",        // Meta Llama 3 8B - good general-purpose
-		"phi3",          // Microsoft Phi-3 - fast, small
-		"mistral",       // Mistral 7B - solid quality
-		"gemma2:2b",     // Google Gemma 2B - very fast on low-end hardware
-		"qwen2.5",       // Alibaba Qwen - strong reasoning
+		"llama3",    // Meta Llama 3 8B - good general-purpose
+		"phi3",      // Microsoft Phi-3 - fast, small
+		"mistral",   // Mistral 7B - solid quality
+		"gemma2:2b", // Google Gemma 2B - very fast on low-end hardware
+		"qwen2.5",   // Alibaba Qwen - strong reasoning
 	}
 }

@@ -2,10 +2,13 @@ package node
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/plenarai/cli/internal/crypto"
 	"github.com/plenarai/cli/internal/inference"
@@ -16,26 +19,40 @@ import (
 // or through a legacy local Ollama instance. Question content stays on the
 // machine in both cases.
 type engine struct {
-	llama      *inference.Server
-	model      string // ollama model tag (legacy path)
-	ollamaURL  string
+	llama       *inference.Server
+	model       string // ollama model tag (legacy path)
+	ollamaURL   string
 	displayName string
 }
 
 func (e *engine) complete(system, user string) string {
-	if e.llama != nil {
-		out, err := e.llama.Chat(system, user)
-		if err != nil {
-			logger.Log.Error("local model request failed", "error", err)
-			return fmt.Sprintf("Error: local AI model failed (%v)", err)
-		}
-		return out
+	out, err := e.completeSafe(system, user)
+	if err != nil {
+		logger.Log.Error("local model request failed", "error", err)
+		return "" // Legacy scoring treats an empty result as abstention.
 	}
-	return e.queryOllama(system + "\n\n" + user)
+	return out
 }
 
-// queryOllama is the legacy single-prompt Ollama path (/api/generate).
-func (e *engine) queryOllama(prompt string) string {
+func (e *engine) completeSafe(system, user string) (string, error) {
+	if e.llama != nil {
+		return e.llama.Chat(system, user)
+	}
+	return e.queryOllamaSafe(system + "\n\n" + user)
+}
+
+// completeMessages is the role-aware engine boundary used by conversation
+// work. The legacy Ollama adapter is intentionally excluded until its chat
+// contract is verified; isolated questions continue through complete.
+func (e *engine) completeMessages(ctx context.Context, messages []inference.Message, options inference.GenerationOptions) (string, error) {
+	if e.llama == nil {
+		return "", inference.ErrRoleAwareChatUnsupported
+	}
+	return e.llama.ChatMessages(ctx, messages, options)
+}
+
+// queryOllamaSafe is the legacy single-prompt Ollama path (/api/generate).
+func (e *engine) queryOllamaSafe(prompt string) (string, error) {
 	if e.model == "" {
 		e.model = "llama3"
 	}
@@ -43,16 +60,23 @@ func (e *engine) queryOllama(prompt string) string {
 	body := []byte(fmt.Sprintf(`{"model":%q,"prompt":%q,"stream":false}`, e.model, prompt))
 	defer crypto.ZeroBytes(body)
 
-	resp, err := http.Post(e.ollamaURL+"/api/generate", "application/json", bytes.NewReader(body))
+	request, err := http.NewRequest(http.MethodPost, e.ollamaURL+"/api/generate", bytes.NewReader(body))
 	if err != nil {
-		logger.Log.Error("ollama request failed", "error", err)
-		return fmt.Sprintf("Error: could not reach local AI model (%v)", err)
+		return "", err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: 3 * time.Minute}).Do(request)
+	if err != nil {
+		return "", err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("ollama returned HTTP %d", resp.StatusCode)
+	}
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return "Error: failed to read AI response"
+		return "", err
 	}
 	defer crypto.ZeroBytes(respBody)
 
@@ -60,7 +84,10 @@ func (e *engine) queryOllama(prompt string) string {
 		Response string `json:"response"`
 	}
 	if err := json.Unmarshal(respBody, &result); err != nil {
-		return "Error: invalid AI response format"
+		return "", err
 	}
-	return result.Response
+	if strings.TrimSpace(result.Response) == "" {
+		return "", fmt.Errorf("ollama returned an empty response")
+	}
+	return result.Response, nil
 }

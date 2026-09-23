@@ -20,6 +20,7 @@ import (
 	"github.com/plenarai/cli/internal/config"
 	"github.com/plenarai/cli/internal/crypto"
 	"github.com/plenarai/cli/internal/inference"
+	"github.com/plenarai/cli/internal/securework"
 	"github.com/plenarai/cli/internal/security"
 	"github.com/plenarai/cli/internal/update"
 	"github.com/plenarai/cli/logger"
@@ -40,10 +41,16 @@ type wsMessage struct {
 }
 
 type questionPayload struct {
-	QuestionID        string `json:"question_id"`
-	EncryptedQuestion []byte `json:"encrypted_question"`
-	EncryptedKey      []byte `json:"encrypted_key"`
-	ServerPublicKey   []byte `json:"server_public_key"`
+	ProtocolVersion      int    `json:"protocol_version"`
+	WorkKind             string `json:"work_kind,omitempty"`
+	QuestionID           string `json:"question_id"`
+	ContextID            string `json:"context_id,omitempty"`
+	ContextSchemaVersion int    `json:"context_schema_version,omitempty"`
+	AssignmentDigest     string `json:"assignment_digest,omitempty"`
+	EncryptedContext     []byte `json:"encrypted_context,omitempty"`
+	EncryptedQuestion    []byte `json:"encrypted_question"`
+	EncryptedKey         []byte `json:"encrypted_key"`
+	ServerPublicKey      []byte `json:"server_public_key"`
 }
 
 const (
@@ -79,6 +86,7 @@ func Run(cfg Config) error {
 		return fmt.Errorf("failed to register public key: %w", err)
 	}
 	fmt.Println("Public key registered with server.")
+	fmt.Println("Security class: standard (secure protocol enabled; host confidentiality is not hardware-verified).")
 
 	// Verify stake before connecting
 	if err := verifyStake(); err != nil {
@@ -129,6 +137,11 @@ func Run(cfg Config) error {
 	if cfg.ScoreOnly {
 		fmt.Println("Score-only mode: this node judges answers but does not respond to questions.")
 	}
+	contextWindowTokens := inference.DefaultContextWindowTokens
+	if eng.llama != nil && eng.llama.ContextWindowTokens > 0 {
+		contextWindowTokens = eng.llama.ContextWindowTokens
+	}
+	capabilities := nodeCapabilities(displayModel, cfg, contextWindowTokens)
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
@@ -159,12 +172,12 @@ func Run(cfg Config) error {
 		}
 	}()
 
-	return runNode(conn, wsURL, quit, questionJobs, scoreJobs)
+	return runNode(conn, wsURL, quit, questionJobs, scoreJobs, capabilities)
 }
 
 // runNode keeps the node online: it dials with a fresh token, serves until the
 // connection drops and reconnects with exponential backoff until Ctrl+C.
-func runNode(conn *SafeConn, wsURL string, quit <-chan os.Signal, questionJobs, scoreJobs chan json.RawMessage) error {
+func runNode(conn *SafeConn, wsURL string, quit <-chan os.Signal, questionJobs, scoreJobs chan json.RawMessage, capabilities securework.CapabilityAnnouncement) error {
 	backoff := 2 * time.Second
 	for {
 		rawConn, err := dial(wsURL)
@@ -174,23 +187,28 @@ func runNode(conn *SafeConn, wsURL string, quit <-chan os.Signal, questionJobs, 
 			if old := conn.Swap(rawConn); old != nil {
 				old.Close()
 			}
-			fmt.Println("Connected as node. Waiting for questions...")
-			backoff = 2 * time.Second
+			if err := announceCapabilities(conn, capabilities); err != nil {
+				logger.Log.Warn("could not announce node capabilities", "error", err)
+				_ = conn.Close()
+			} else {
+				fmt.Println("Connected as node. Waiting for questions...")
+				backoff = 2 * time.Second
 
-			disconnected := make(chan error, 1)
-			go func() {
-				disconnected <- pumpMessages(conn, questionJobs, scoreJobs)
-			}()
+				disconnected := make(chan error, 1)
+				go func() {
+					disconnected <- pumpMessages(conn, questionJobs, scoreJobs)
+				}()
 
-			select {
-			case serr := <-disconnected:
-				if !isExpectedClose(serr) {
-					logger.Log.Warn("connection lost; reconnecting", "error", serr)
-					fmt.Println("Connection lost; reconnecting...")
+				select {
+				case serr := <-disconnected:
+					if !isExpectedClose(serr) {
+						logger.Log.Warn("connection lost; reconnecting", "error", serr)
+						fmt.Println("Connection lost; reconnecting...")
+					}
+				case <-quit:
+					shutdownConn(conn)
+					return nil
 				}
-			case <-quit:
-				shutdownConn(conn)
-				return nil
 			}
 		}
 
@@ -204,6 +222,41 @@ func runNode(conn *SafeConn, wsURL string, quit <-chan os.Signal, questionJobs, 
 			backoff *= 2
 		}
 	}
+}
+
+func nodeCapabilities(modelName string, cfg Config, contextWindowTokens int) securework.CapabilityAnnouncement {
+	engine := "ollama"
+	if cfg.ModelPath != "" {
+		engine = "llama.cpp"
+	}
+	capabilities := securework.CapabilityAnnouncement{
+		ProtocolVersion: securework.CapabilityProtocolVersion,
+		Capabilities:    []string{securework.CapabilityQuestionV1},
+		ModelID:         modelName,
+		Engine:          engine,
+		Template:        "question-v1",
+		MaxPayloadBytes: securework.MaxNodePayloadBytes,
+	}
+	if cfg.ModelPath != "" {
+		capabilities.Capabilities = append(capabilities.Capabilities, securework.CapabilityConversationContext)
+		capabilities.Template = "chat-v1"
+		capabilities.ContextWindowTokens = contextWindowTokens
+		capabilities.MaxOutputTokens = inference.DefaultMaxOutputTokens
+		capabilities.SupportsRoles = true
+	}
+	return capabilities
+}
+
+func announceCapabilities(conn *SafeConn, capabilities securework.CapabilityAnnouncement) error {
+	payload, err := json.Marshal(capabilities)
+	if err != nil {
+		return err
+	}
+	data, err := json.Marshal(wsMessage{Type: "capabilities", Data: payload})
+	if err != nil {
+		return err
+	}
+	return conn.WriteMessage(websocket.TextMessage, data)
 }
 
 // shutdownConn sends a polite close frame best effort.
@@ -310,6 +363,24 @@ func registerPublicKey(publicKey []byte) error {
 		return fmt.Errorf("server returned %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// reportMinCost publishes this node's minimum accepted question price.
+func reportMinCost(minCost float64) {
+	body, _ := json.Marshal(map[string]float64{"min_cost": minCost})
+	resp, err := auth.DoAuthenticated(func() (*http.Request, error) {
+		req, err := http.NewRequest(http.MethodPost, config.ServerURL+"/v0/node/min-cost", bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		return req, nil
+	})
+	if err != nil {
+		logger.Log.Warn("could not report min cost", "error", err)
+		return
+	}
+	defer resp.Body.Close()
 }
 
 // reportModel publishes the model identifier this node runs. Best effort:

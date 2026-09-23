@@ -57,9 +57,141 @@ func AssetName() string {
 }
 
 func isNewer(latest, current string) bool {
-	l := strings.TrimPrefix(latest, "v")
-	c := strings.TrimPrefix(current, "v")
-	return l != "" && l != c
+	l, lok := parseSemver(latest)
+	c, cok := parseSemver(current)
+	return lok && cok && compareSemver(l, c) > 0
+}
+
+// semanticVersion is the comparable portion of a Semantic Version. Build
+// metadata is intentionally parsed and discarded because it has no ordering
+// semantics.
+type semanticVersion struct {
+	major, minor, patch string
+	pre                 []string
+}
+
+// parseSemver accepts the v-prefixed tags used by GitHub Releases and follows
+// the SemVer 2.0.0 rules for numeric and pre-release identifiers. Invalid
+// versions are rejected rather than being treated as an update.
+func parseSemver(raw string) (semanticVersion, bool) {
+	if strings.HasPrefix(raw, "v") {
+		raw = raw[1:]
+	}
+	if raw == "" {
+		return semanticVersion{}, false
+	}
+
+	if plus := strings.IndexByte(raw, '+'); plus >= 0 {
+		if !validIdentifierList(raw[plus+1:], true) {
+			return semanticVersion{}, false
+		}
+		raw = raw[:plus]
+	}
+	parts := strings.SplitN(raw, "-", 2)
+	core := strings.Split(parts[0], ".")
+	if len(core) != 3 || !validNumericIdentifier(core[0]) || !validNumericIdentifier(core[1]) || !validNumericIdentifier(core[2]) {
+		return semanticVersion{}, false
+	}
+
+	var pre []string
+	if len(parts) == 2 {
+		if !validIdentifierList(parts[1], false) {
+			return semanticVersion{}, false
+		}
+		pre = strings.Split(parts[1], ".")
+	}
+	return semanticVersion{major: core[0], minor: core[1], patch: core[2], pre: pre}, true
+}
+
+func validNumericIdentifier(value string) bool {
+	if value == "" || (len(value) > 1 && value[0] == '0') {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		if value[i] < '0' || value[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func validIdentifierList(value string, numericLeadingZeroAllowed bool) bool {
+	if value == "" {
+		return false
+	}
+	for _, identifier := range strings.Split(value, ".") {
+		if identifier == "" {
+			return false
+		}
+		digits := true
+		for i := 0; i < len(identifier); i++ {
+			ch := identifier[i]
+			if (ch < '0' || ch > '9') && (ch < 'A' || ch > 'Z') && (ch < 'a' || ch > 'z') && ch != '-' {
+				return false
+			}
+			if ch < '0' || ch > '9' {
+				digits = false
+			}
+		}
+		if digits && !numericLeadingZeroAllowed && len(identifier) > 1 && identifier[0] == '0' {
+			return false
+		}
+	}
+	return true
+}
+
+func compareSemver(a, b semanticVersion) int {
+	for _, pair := range [][2]string{{a.major, b.major}, {a.minor, b.minor}, {a.patch, b.patch}} {
+		if cmp := compareNumeric(pair[0], pair[1]); cmp != 0 {
+			return cmp
+		}
+	}
+	if len(a.pre) == 0 && len(b.pre) == 0 {
+		return 0
+	}
+	if len(a.pre) == 0 {
+		return 1
+	}
+	if len(b.pre) == 0 {
+		return -1
+	}
+	for i := 0; i < len(a.pre) && i < len(b.pre); i++ {
+		if cmp := comparePrereleaseIdentifier(a.pre[i], b.pre[i]); cmp != 0 {
+			return cmp
+		}
+	}
+	if len(a.pre) < len(b.pre) {
+		return -1
+	}
+	if len(a.pre) > len(b.pre) {
+		return 1
+	}
+	return 0
+}
+
+func comparePrereleaseIdentifier(a, b string) int {
+	aNumeric := validNumericIdentifier(a)
+	bNumeric := validNumericIdentifier(b)
+	if aNumeric && bNumeric {
+		return compareNumeric(a, b)
+	}
+	if aNumeric != bNumeric {
+		if aNumeric {
+			return -1
+		}
+		return 1
+	}
+	return strings.Compare(a, b)
+}
+
+func compareNumeric(a, b string) int {
+	if len(a) < len(b) {
+		return -1
+	}
+	if len(a) > len(b) {
+		return 1
+	}
+	return strings.Compare(a, b)
 }
 
 // CheckAvailable returns the latest tag if it differs from the running version.

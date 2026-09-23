@@ -3,6 +3,7 @@ package auth
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -18,7 +19,18 @@ type TokenPair struct {
 	RefreshToken string `json:"refresh_token"`
 }
 
+const (
+	configDirMode  os.FileMode = 0o700
+	configFileMode os.FileMode = 0o600
+	configFileName             = "config.yaml"
+)
+
 func ConfigDir() string {
+	// A separate directory gives each local participant its own credentials,
+	// node key and engine settings without changing the OS user's home directory.
+	if dir := os.Getenv("PLENARAI_CONFIG_DIR"); dir != "" {
+		return filepath.Clean(dir)
+	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".plenarai")
 }
@@ -44,21 +56,26 @@ func Login(email, password string) (*TokenPair, error) {
 }
 
 func SaveTokens(tokens *TokenPair) error {
-	dir := ConfigDir()
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	path, err := configPath(true)
+	if err != nil {
 		return err
 	}
 
 	viper.Set("access_token", tokens.AccessToken)
 	viper.Set("refresh_token", tokens.RefreshToken)
-	return viper.WriteConfigAs(filepath.Join(dir, "config.yaml"))
+	viper.SetConfigPermissions(configFileMode)
+	if err := viper.WriteConfigAs(path); err != nil {
+		return err
+	}
+	return secureNativeConfigPermissions(path, false)
 }
 
 func LoadTokens() (*TokenPair, error) {
-	dir := ConfigDir()
-	viper.SetConfigName("config")
-	viper.SetConfigType("yaml")
-	viper.AddConfigPath(dir)
+	path, err := configPath(false)
+	if err != nil {
+		return nil, fmt.Errorf("not logged in")
+	}
+	viper.SetConfigFile(path)
 
 	if err := viper.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("not logged in")
@@ -145,20 +162,115 @@ func DoAuthenticated(buildReq func() (*http.Request, error)) (*http.Response, er
 
 // SaveConfig persists current viper state to the config file.
 func SaveConfig() error {
-	dir := ConfigDir()
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	path, err := configPath(true)
+	if err != nil {
 		return err
 	}
-	return viper.WriteConfigAs(filepath.Join(dir, "config.yaml"))
+	viper.SetConfigPermissions(configFileMode)
+	if err := viper.WriteConfigAs(path); err != nil {
+		return err
+	}
+	return secureNativeConfigPermissions(path, false)
 }
 
 // LoadConfig reads the config file if present. Silent on missing file.
 func LoadConfig() {
-	dir := ConfigDir()
-	viper.SetConfigName("config")
-	viper.SetConfigType("yaml")
-	viper.AddConfigPath(dir)
+	path, err := configPath(false)
+	if err != nil {
+		return
+	}
+	viper.SetConfigFile(path)
 	_ = viper.ReadInConfig()
+}
+
+// configPath validates the participant's config directory and file before any
+// read or write. The write path also tightens permissions on existing objects;
+// this does not configure platform-specific ACLs on Windows.
+func configPath(prepareForWrite bool) (string, error) {
+	dir := ConfigDir()
+	if err := validateConfigDirForSecrets(dir); err != nil {
+		return "", err
+	}
+	if prepareForWrite {
+		if info, err := os.Lstat(dir); err == nil {
+			if info.Mode()&os.ModeSymlink != 0 {
+				return "", fmt.Errorf("config directory must not be a symlink: %s", dir)
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		if err := os.MkdirAll(dir, configDirMode); err != nil {
+			return "", err
+		}
+	}
+
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return "", err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("config directory must not be a symlink: %s", dir)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("config path is not a directory: %s", dir)
+	}
+	if prepareForWrite {
+		if err := os.Chmod(dir, configDirMode); err != nil {
+			return "", fmt.Errorf("secure config directory: %w", err)
+		}
+	}
+	if err := secureNativeConfigPermissions(dir, true); err != nil {
+		return "", fmt.Errorf("secure config directory: %w", err)
+	}
+
+	path := filepath.Join(dir, configFileName)
+	fileInfo, err := os.Lstat(path)
+	if err == nil {
+		if fileInfo.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("config file must not be a symlink: %s", path)
+		}
+		if !fileInfo.Mode().IsRegular() {
+			return "", fmt.Errorf("config path is not a regular file: %s", path)
+		}
+		if prepareForWrite {
+			if err := os.Chmod(path, configFileMode); err != nil {
+				return "", fmt.Errorf("secure config file: %w", err)
+			}
+		}
+		if err := secureNativeConfigPermissions(path, false); err != nil {
+			return "", fmt.Errorf("secure config file: %w", err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	return path, nil
+}
+
+func validateConfigDirForSecrets(dir string) error {
+	if !filepath.IsAbs(dir) || filepath.Dir(dir) == dir {
+		return fmt.Errorf("config directory must be an absolute, non-root path")
+	}
+	if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
+		return fmt.Errorf("config directory must not be a repository root")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		if dirInfo, dirErr := os.Stat(dir); dirErr == nil {
+			if cwdInfo, cwdErr := os.Stat(cwd); cwdErr == nil && os.SameFile(dirInfo, cwdInfo) {
+				return fmt.Errorf("config directory must not be the working directory")
+			}
+		}
+	}
+	home, err := os.UserHomeDir()
+	if err == nil && home != "" {
+		if dirInfo, dirErr := os.Stat(dir); dirErr == nil {
+			if homeInfo, homeErr := os.Stat(home); homeErr == nil && os.SameFile(dirInfo, homeInfo) {
+				return fmt.Errorf("config directory must not be the home directory")
+			}
+		}
+	}
+	return nil
 }
 
 // Logout revokes the refresh token server-side (best effort) and removes saved tokens.

@@ -1,0 +1,15 @@
+{
+  "envelope": {
+    "version": 1,
+    "kind": "response",
+    "job_id": "018f47d2-9e2a-7d3f-a4c1-123456789abc",
+    "issued_at": 1800000000,
+    "expires_at": 1800000120,
+    "nonce": "//79/Pv6+fj39vX08/Lx8O/u7ezr6uno5+bl5OPi4eA=",
+    "ciphertext": "AAECAwQFBgcICQoLDA0ODw==",
+    "signing_key": "A6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+    "signature": "pUonAizQ6XjHdUeuKQ5mpsldvYZv4jW8T64a7QxAPzlOtu9turgmZKMG00BNHg5YXUjedbj/z06J1L8cvQc7AQ=="
+  },
+  "name": "plenarai-secure-work-v1-result",
+  "transcript_base64": "AAAAAAAAAAEAAAAAAAAACHJlc3BvbnNlAAAAAAAAACQwMThmNDdkMi05ZTJhLTdkM2YtYTRjMS0xMjM0NTY3ODlhYmMAAAAAa0nSAAAAAABrSdJ4AAAAAAAAACD//v38+/r5+Pf29fTz8vHw7+7t7Ovq6ejn5uXk4+Lh4AAAAAAAAAAgA6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbgAAAAAAAAAEAABAgMEBQYHCAkKCwwNDg8="
+}
