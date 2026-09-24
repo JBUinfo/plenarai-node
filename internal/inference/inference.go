@@ -49,6 +49,7 @@ const (
 	inferencePreflightTimeout        = 10 * time.Second
 	maxChatResponseSize        int64 = 16 << 20
 	DefaultContextWindowTokens       = 4096
+	MaxContextWindowTokens           = 32768
 	DefaultMaxOutputTokens           = 1024
 	MaxConversationMessages          = 128
 )
@@ -68,6 +69,15 @@ var (
 // Start launches llama-server with the given model on a free localhost port
 // and waits until its health endpoint responds.
 func Start(serverBin, modelPath string) (*Server, error) {
+	return StartWithContextWindow(serverBin, modelPath, DefaultContextWindowTokens)
+}
+
+// StartWithContextWindow lets a node reserve a larger local window when its
+// model and memory permit it. The observed /props value is announced to peers.
+func StartWithContextWindow(serverBin, modelPath string, contextWindowTokens int) (*Server, error) {
+	if contextWindowTokens < DefaultContextWindowTokens || contextWindowTokens > MaxContextWindowTokens {
+		return nil, fmt.Errorf("context window must be between %d and %d tokens", DefaultContextWindowTokens, MaxContextWindowTokens)
+	}
 	port, err := freePort()
 	if err != nil {
 		return nil, fmt.Errorf("no free port: %w", err)
@@ -77,7 +87,7 @@ func Start(serverBin, modelPath string) (*Server, error) {
 		"--model", modelPath,
 		"--host", "127.0.0.1",
 		"--port", fmt.Sprint(port),
-		"--ctx-size", "4096",
+		"--ctx-size", fmt.Sprint(contextWindowTokens),
 	)
 	// Route engine output to the OS log sink so it never pollutes the TUI.
 	cmd.Stdout = nil

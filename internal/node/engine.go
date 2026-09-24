@@ -19,10 +19,11 @@ import (
 // or through a legacy local Ollama instance. Question content stays on the
 // machine in both cases.
 type engine struct {
-	llama       *inference.Server
-	model       string // ollama model tag (legacy path)
-	ollamaURL   string
-	displayName string
+	llama           *inference.Server
+	model           string // ollama model tag (legacy path)
+	ollamaURL       string
+	displayName     string
+	maxOutputTokens int
 }
 
 func (e *engine) complete(system, user string) string {
@@ -36,7 +37,10 @@ func (e *engine) complete(system, user string) string {
 
 func (e *engine) completeSafe(system, user string) (string, error) {
 	if e.llama != nil {
-		return e.llama.Chat(system, user)
+		return e.llama.ChatMessages(context.Background(), []inference.Message{
+			{Role: "system", Content: system},
+			{Role: "user", Content: user},
+		}, inference.GenerationOptions{MaxOutputTokens: e.maxOutputTokens})
 	}
 	return e.queryOllamaSafe(system + "\n\n" + user)
 }
@@ -47,6 +51,9 @@ func (e *engine) completeSafe(system, user string) (string, error) {
 func (e *engine) completeMessages(ctx context.Context, messages []inference.Message, options inference.GenerationOptions) (string, error) {
 	if e.llama == nil {
 		return "", inference.ErrRoleAwareChatUnsupported
+	}
+	if e.maxOutputTokens > 0 && (options.MaxOutputTokens <= 0 || options.MaxOutputTokens > e.maxOutputTokens) {
+		options.MaxOutputTokens = e.maxOutputTokens
 	}
 	return e.llama.ChatMessages(ctx, messages, options)
 }

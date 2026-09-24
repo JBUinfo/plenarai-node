@@ -24,17 +24,12 @@ GOARCH=$(shell go env GOARCH)
 build:
 	GOOS=$(GOOS) GOARCH=$(GOARCH) go build -o $(BINARY_NAME)$(EXT) ./cmd/plenarai
 
-# Production build (ofuscado + firmado + optimizado)
+# Experimental obfuscated build; NOT a cryptographic signature.
 # Requiere: go install mvdan.cc/garble@latest
 release:
 	@echo "Building obfuscated binary for $(GOOS)/$(GOARCH)..."
 	GOOS=$(GOOS) GOARCH=$(GOARCH) garble -tiny -literals -seed=random build -trimpath -ldflags "-s -w" -o $(BINARY_NAME)$(EXT) ./cmd/plenarai
-	@echo "Computing integrity hash..."
-	$(eval HASH := $(shell sha256sum $(BINARY_NAME)$(EXT) | cut -d' ' -f1))
-	@echo "Hash: $(HASH)"
-	@echo "Rebuilding with embedded hash..."
-	GOOS=$(GOOS) GOARCH=$(GOARCH) garble -tiny -literals -seed=random build -trimpath -ldflags "-s -w -X $(MODULE)/internal/security.ExpectedHash=$(HASH)" -o $(BINARY_NAME)$(EXT) ./cmd/plenarai
-	@echo "Production build complete: $(BINARY_NAME)$(EXT)"
+	@echo "Experimental build complete: $(BINARY_NAME)$(EXT)"
 
 # Production cross-platform builds (plain Go). Recommended for public
 # distribution: obfuscated binaries trigger antivirus false positives and
@@ -43,12 +38,17 @@ release:
 # platform binary no matter what the output file is called.
 SERVER_URL_LDFLAGS := -X $(MODULE)/internal/config.ServerURL=https://plenarai.com
 RELEASE_LDFLAGS := -s -w $(SERVER_URL_LDFLAGS)
+RELEASE_VERSION ?= local
 
 release-all:
-	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "$(RELEASE_LDFLAGS)" -o $(BINARY_NAME)-linux-amd64 ./cmd/plenarai
-	GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "$(RELEASE_LDFLAGS)" -o $(BINARY_NAME)-darwin-amd64 ./cmd/plenarai
-	GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "$(RELEASE_LDFLAGS)" -o $(BINARY_NAME)-darwin-arm64 ./cmd/plenarai
-	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "$(RELEASE_LDFLAGS)" -o $(BINARY_NAME)-windows-amd64.exe ./cmd/plenarai
+	mkdir -p dist
+	GOEXPERIMENT=runtimesecret GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "$(RELEASE_LDFLAGS) -X $(MODULE)/internal/config.Version=$(RELEASE_VERSION)" -o dist/$(BINARY_NAME)-linux-amd64 ./cmd/plenarai
+	GOEXPERIMENT=runtimesecret GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "$(RELEASE_LDFLAGS) -X $(MODULE)/internal/config.Version=$(RELEASE_VERSION)" -o dist/$(BINARY_NAME)-linux-arm64 ./cmd/plenarai
+	GOEXPERIMENT= GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "$(RELEASE_LDFLAGS) -X $(MODULE)/internal/config.Version=$(RELEASE_VERSION)" -o dist/$(BINARY_NAME)-darwin-amd64 ./cmd/plenarai
+	GOEXPERIMENT= GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -ldflags "$(RELEASE_LDFLAGS) -X $(MODULE)/internal/config.Version=$(RELEASE_VERSION)" -o dist/$(BINARY_NAME)-darwin-arm64 ./cmd/plenarai
+	GOEXPERIMENT= GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "$(RELEASE_LDFLAGS) -X $(MODULE)/internal/config.Version=$(RELEASE_VERSION)" -o dist/$(BINARY_NAME)-windows-amd64.exe ./cmd/plenarai
+	printf '%s\n' 'plenarai-linux-amd64 runtime_secret=enabled-experimental' 'plenarai-linux-arm64 runtime_secret=enabled-experimental' 'plenarai-darwin-amd64 runtime_secret=unavailable' 'plenarai-darwin-arm64 runtime_secret=unavailable' 'plenarai-windows-amd64.exe runtime_secret=unavailable' > dist/BUILD-METADATA.txt
+	cd dist && sha256sum plenarai-* BUILD-METADATA.txt > SHA256SUMS.txt && sha256sum --check SHA256SUMS.txt
 
 # Obfuscated variant (garble). Higher false-positive risk with antivirus;
 # only use when you accept that trade-off.
@@ -56,6 +56,7 @@ GARBLE := garble -tiny -literals -seed=random
 
 release-all-obfuscated:
 	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 $(GARBLE) build -trimpath -ldflags "$(RELEASE_LDFLAGS)" -o $(BINARY_NAME)-linux-amd64 ./cmd/plenarai
+	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 $(GARBLE) build -trimpath -ldflags "$(RELEASE_LDFLAGS)" -o $(BINARY_NAME)-linux-arm64 ./cmd/plenarai
 	GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 $(GARBLE) build -trimpath -ldflags "$(RELEASE_LDFLAGS)" -o $(BINARY_NAME)-darwin-amd64 ./cmd/plenarai
 	GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 $(GARBLE) build -trimpath -ldflags "$(RELEASE_LDFLAGS)" -o $(BINARY_NAME)-darwin-arm64 ./cmd/plenarai
 	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 $(GARBLE) build -trimpath -ldflags "$(RELEASE_LDFLAGS)" -o $(BINARY_NAME)-windows-amd64.exe ./cmd/plenarai

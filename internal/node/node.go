@@ -27,12 +27,14 @@ import (
 )
 
 type Config struct {
-	PromptFile string
-	ConfigDir  string
-	Model      string
-	OllamaURL  string
-	ModelPath  string // custom GGUF; when set, the bundled llama-server is used
-	ScoreOnly  bool   // judge answers but never respond to questions
+	PromptFile          string
+	ConfigDir           string
+	Model               string
+	OllamaURL           string
+	ModelPath           string // custom GGUF; when set, the bundled llama-server is used
+	MaxOutputTokens     int    // local llama.cpp generation cap; zero uses the default
+	ContextWindowTokens int    // local llama.cpp context window; zero uses the default
+	ScoreOnly           bool   // judge answers but never respond to questions
 }
 
 type wsMessage struct {
@@ -59,6 +61,18 @@ const (
 )
 
 func Run(cfg Config) error {
+	if cfg.MaxOutputTokens == 0 {
+		cfg.MaxOutputTokens = inference.DefaultMaxOutputTokens
+	}
+	if cfg.MaxOutputTokens < 1 || cfg.MaxOutputTokens > inference.DefaultMaxOutputTokens {
+		return fmt.Errorf("max-output-tokens must be between 1 and %d", inference.DefaultMaxOutputTokens)
+	}
+	if cfg.ContextWindowTokens == 0 {
+		cfg.ContextWindowTokens = inference.DefaultContextWindowTokens
+	}
+	if cfg.ContextWindowTokens < inference.DefaultContextWindowTokens || cfg.ContextWindowTokens > inference.MaxContextWindowTokens {
+		return fmt.Errorf("context-window-tokens must be between %d and %d", inference.DefaultContextWindowTokens, inference.MaxContextWindowTokens)
+	}
 	// Anti-debugging check
 	if err := security.CheckDebugger(); err != nil {
 		return err
@@ -100,14 +114,17 @@ func Run(cfg Config) error {
 			cfg.ModelPath = saved
 		}
 	}
-	eng := &engine{model: cfg.Model, ollamaURL: cfg.OllamaURL}
+	if cfg.ModelPath == "" && (cfg.MaxOutputTokens != inference.DefaultMaxOutputTokens || cfg.ContextWindowTokens != inference.DefaultContextWindowTokens) {
+		return fmt.Errorf("generation limits require a local GGUF model")
+	}
+	eng := &engine{model: cfg.Model, ollamaURL: cfg.OllamaURL, maxOutputTokens: cfg.MaxOutputTokens}
 	if cfg.ModelPath != "" {
 		serverBin := viper.GetString("llama.server_bin")
 		if serverBin == "" {
 			return fmt.Errorf("llama-server not configured; run 'plenarai setup' first")
 		}
 		fmt.Println("Starting local model engine...")
-		srv, err := inference.Start(serverBin, cfg.ModelPath)
+		srv, err := inference.StartWithContextWindow(serverBin, cfg.ModelPath, cfg.ContextWindowTokens)
 		if err != nil {
 			return err
 		}
@@ -241,7 +258,7 @@ func nodeCapabilities(modelName string, cfg Config, contextWindowTokens int) sec
 		capabilities.Capabilities = append(capabilities.Capabilities, securework.CapabilityConversationContext)
 		capabilities.Template = "chat-v1"
 		capabilities.ContextWindowTokens = contextWindowTokens
-		capabilities.MaxOutputTokens = inference.DefaultMaxOutputTokens
+		capabilities.MaxOutputTokens = cfg.MaxOutputTokens
 		capabilities.SupportsRoles = true
 	}
 	return capabilities
