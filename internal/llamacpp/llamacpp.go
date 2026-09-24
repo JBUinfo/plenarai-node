@@ -58,9 +58,10 @@ var pinnedAssets = map[string]asset{
 const serverBinary = "llama-server"
 
 // DefaultModelURL is the GGUF downloaded by `plenarai setup` when the user
-// does not supply their own model path or URL. It points at the official
-// vendor repository on Hugging Face; community mirrors come and go.
-const DefaultModelURL = "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf"
+// does not supply their own model path or URL. Pin both the vendor repository
+// revision and the Git-LFS content hash so a moving branch cannot replace it.
+const DefaultModelURL = "https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/7dabda4d13d513e3e842b20f0d435c732f172cbe/qwen2.5-3b-instruct-q4_k_m.gguf"
+const DefaultModelSHA256 = "626b4a6678b86442240e33df819e00132d3ba7dddfe1cdc4fbb18e0a9615c62d"
 
 // DefaultModelName is the identifier reported to the backend for the default model.
 const DefaultModelName = "qwen2.5-3b-instruct-q4_k_m"
@@ -296,6 +297,11 @@ func extractZip(archivePath, destDir string) error {
 // DownloadModel streams a GGUF file to dest with progress output.
 func DownloadModel(url, dest string) error {
 	if _, err := os.Stat(dest); err == nil {
+		if url == DefaultModelURL {
+			if err := verifyFileSHA256(dest, DefaultModelSHA256); err != nil {
+				return fmt.Errorf("existing default model: %w", err)
+			}
+		}
 		fmt.Printf("Model already present: %s\n", dest)
 		return nil
 	}
@@ -311,7 +317,29 @@ func DownloadModel(url, dest string) error {
 		}
 		return err
 	}
+	if url == DefaultModelURL {
+		if err := verifyFileSHA256(tmp, DefaultModelSHA256); err != nil {
+			_ = os.Remove(tmp)
+			return fmt.Errorf("downloaded default model: %w", err)
+		}
+	}
 	return os.Rename(tmp, dest)
+}
+
+func verifyFileSHA256(path, want string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return err
+	}
+	if got := hex.EncodeToString(h.Sum(nil)); got != want {
+		return fmt.Errorf("SHA-256 mismatch: got %s, want %s", got, want)
+	}
+	return nil
 }
 
 func httpDownload(url, dest string) (retErr error) {
