@@ -67,7 +67,7 @@ cosign verify-blob SHA256SUMS.txt --bundle SHA256SUMS.txt.sigstore.json \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
-For GitHub release assets, replace `build-deploy.yml` with `release-public.yml` in the identity above. A valid signature only authenticates the manifest; you must still compare the binary's SHA-256 against the signed entry.
+For GitHub release assets, the signing identity is `https://github.com/JBUinfo/plenarai-node/.github/workflows/release.yml@refs/heads/main`. A valid signature only authenticates the manifest; you must still compare the binary's SHA-256 against the signed entry.
 
 ## License
 

@@ -1,0 +1,110 @@
+name: Build, sign and publish public CLI beta
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Beta SemVer tag, for example v0.1.0-beta.1'
+        required: true
+        type: string
+      confirmation:
+        description: 'Type RELEASE to publish'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: plenarai-public-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      VERSION: ${{ inputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out reviewed public source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Validate release request
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          set -euo pipefail
+          test "$CONFIRMATION" = "RELEASE"
+          [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-beta\.[0-9]+$ ]]
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            echo "Release $VERSION already exists" >&2
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/${VERSION}" >/dev/null 2>&1; then
+            echo "Tag $VERSION already exists" >&2
+            exit 1
+          fi
+
+      - name: Test and build supported platforms
+        run: |
+          set -euo pipefail
+          CGO_ENABLED=0 go test ./...
+          CGO_ENABLED=0 go vet ./...
+          mkdir -p dist
+          for target in "linux amd64" "linux arm64" "darwin amd64" "darwin arm64" "windows amd64"; do
+            set -- $target
+            extension=""
+            if [ "$1" = "windows" ]; then extension=".exe"; fi
+            goexperiment=""
+            if [ "$1" = "linux" ]; then goexperiment="runtimesecret"; fi
+            GOEXPERIMENT="$goexperiment" GOOS="$1" GOARCH="$2" CGO_ENABLED=0 go build -trimpath \
+              -ldflags "-s -w -X github.com/plenarai/cli/internal/config.ServerURL=https://plenarai.com -X github.com/plenarai/cli/internal/config.Version=${VERSION}" \
+              -o "dist/plenarai-$1-$2${extension}" ./cmd/plenarai
+          done
+          printf '%s\n' \
+            'plenarai-linux-amd64 runtime_secret=enabled-experimental' \
+            'plenarai-linux-arm64 runtime_secret=enabled-experimental' \
+            'plenarai-darwin-amd64 runtime_secret=unavailable' \
+            'plenarai-darwin-arm64 runtime_secret=unavailable' \
+            'plenarai-windows-amd64.exe runtime_secret=unavailable' \
+            > dist/BUILD-METADATA.txt
+          (cd dist && sha256sum plenarai-* BUILD-METADATA.txt > SHA256SUMS.txt && sha256sum --check SHA256SUMS.txt)
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.3
+
+      - name: Sign and verify checksum manifest
+        run: |
+          set -euo pipefail
+          cosign sign-blob --yes --bundle dist/SHA256SUMS.txt.sigstore.json dist/SHA256SUMS.txt
+          cosign verify-blob dist/SHA256SUMS.txt \
+            --bundle dist/SHA256SUMS.txt.sigstore.json \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/heads/main" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+      - name: Preserve signed assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: plenarai-public-${{ inputs.version }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish prerelease
+        run: |
+          set -euo pipefail
+          gh release create "$VERSION" dist/* \
+            --target "$GITHUB_SHA" --prerelease \
+            --title "PlenarAI CLI ${VERSION}" --generate-notes
