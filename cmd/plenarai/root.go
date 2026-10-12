@@ -364,7 +364,15 @@ var registerCmd = &cobra.Command{
 			return fmt.Errorf("registration failed (status %d)", resp.StatusCode)
 		}
 
+		var created struct {
+			VerificationRequired bool `json:"verification_required"`
+		}
+		_ = json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&created)
 		fmt.Println("Registration successful.")
+		if created.VerificationRequired {
+			fmt.Printf("We have emailed a verification link to %s. Open it, then run 'plenarai login'.\n", email)
+			return nil
+		}
 		return doLogin(email, password)
 	},
 }

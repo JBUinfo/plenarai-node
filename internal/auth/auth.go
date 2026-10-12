@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -45,6 +46,17 @@ func Login(email, password string) (*TokenPair, error) {
 
 	if resp.StatusCode == http.StatusTooManyRequests {
 		return nil, fmt.Errorf("too many requests or failed attempts; wait up to 15 minutes and try again")
+	}
+	if resp.StatusCode == http.StatusForbidden {
+		var refusal struct {
+			Code string `json:"code"`
+		}
+		if json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&refusal) == nil && refusal.Code == "email_not_verified" {
+			return nil, fmt.Errorf("email not verified: open the link we emailed you, then log in again; to get a new link, sign in at %s/login", config.ServerURL)
+		}
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, fmt.Errorf("invalid email or password; to reset it, visit %s/forgot-password", config.ServerURL)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("login failed (status %d)", resp.StatusCode)

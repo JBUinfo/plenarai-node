@@ -15,10 +15,13 @@ Download a prebuilt binary for your platform from [plenarai.com/download](https:
 ```bash
 chmod +x plenarai-*        # macOS/Linux only
 ./plenarai register        # asks you to confirm that you are at least 18
+                           # then open the verification link we email you
 ./plenarai login
 ./plenarai setup           # installs the pinned llama.cpp engine + a starter model
 ./plenarai node --stake 5  # go online and start earning
 ```
+
+Forgot your password? Reset it at [plenarai.com/forgot-password](https://plenarai.com/forgot-password).
 
 `setup` downloads a pinned `llama-server` build and starter GGUF model, both checked against hard-coded SHA-256 digests, into `~/.plenarai/`. Bring your own model only if you trust its source.
 
@@ -60,17 +63,15 @@ The bundled engine applies the chat template embedded in the model file. Legacy 
 - Never include personal data or secrets in a question.
 - The bundled inference engine is configured for localhost. If you opt into Ollama, review its network configuration separately.
 - Nodes decrypt question content to process it; do not send personal data or secrets. Transport and worker-message protections do not make a node confidential hardware.
-- Production download binaries have a SHA-256 manifest signed by the `JBUinfo/plenarai-cli` GitHub Actions workflow using Sigstore. Download `SHA256SUMS.txt.sigstore.json` alongside the manifest and verify its exact workflow identity before comparing your binary's hash. This is a build-origin signature, not Windows Authenticode or macOS Developer ID signing.
-
-For binaries from `plenarai.com/download`, use:
+- Binaries come with a SHA-256 manifest signed with Sigstore by this repository's `release.yml` workflow. `plenarai.com/download` serves the same bytes as the GitHub release. Download `SHA256SUMS.txt.sigstore.json` alongside the manifest and verify its exact workflow identity before comparing your binary's hash. This is a build-origin signature, not Windows Authenticode or macOS Developer ID signing.
 
 ```bash
 cosign verify-blob SHA256SUMS.txt --bundle SHA256SUMS.txt.sigstore.json \
-  --certificate-identity https://github.com/JBUinfo/plenarai-cli/.github/workflows/build-deploy.yml@refs/heads/main \
+  --certificate-identity https://github.com/JBUinfo/plenarai-node/.github/workflows/release.yml@refs/heads/main \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 ```
 
-For GitHub release assets, the signing identity is `https://github.com/JBUinfo/plenarai-node/.github/workflows/release.yml@refs/heads/main`. A valid signature only authenticates the manifest; you must still compare the binary's SHA-256 against the signed entry.
+A valid signature only authenticates the manifest; you must still compare the binary's SHA-256 against the signed entry.
 
 ## License
 
