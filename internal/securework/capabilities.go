@@ -30,7 +30,6 @@ const (
 	maxCapabilityStringBytes = 256
 	maxArtifactDigestBytes   = 128
 	maxContextWindowTokens   = 1 << 20
-	maxOutputTokens          = 1 << 20
 )
 
 var ErrInvalidCapabilities = errors.New("invalid node capabilities")
@@ -48,9 +47,11 @@ type CapabilityAnnouncement struct {
 	Engine              string   `json:"engine,omitempty"`
 	Template            string   `json:"template,omitempty"`
 	ContextWindowTokens int      `json:"context_window_tokens,omitempty"`
-	MaxOutputTokens     int      `json:"max_output_tokens,omitempty"`
-	MaxPayloadBytes     int      `json:"max_payload_bytes,omitempty"`
-	SupportsRoles       bool     `json:"supports_roles,omitempty"`
+	// PromptOverheadTokens is the node's measured system prompt and template framing.
+	PromptOverheadTokens int    `json:"prompt_overhead_tokens,omitempty"`
+	MaxPayloadBytes      int    `json:"max_payload_bytes,omitempty"`
+	SupportsRoles        bool   `json:"supports_roles,omitempty"`
+	OpaqueSigningKey     []byte `json:"opaque_signing_key,omitempty"`
 }
 
 func (c CapabilityAnnouncement) Validate() error {
@@ -68,6 +69,9 @@ func (c CapabilityAnnouncement) Validate() error {
 		}
 		seen[capability] = struct{}{}
 	}
+	if _, ok := seen["opaque_conversation_v2"]; ok && len(c.OpaqueSigningKey) != 32 {
+		return ErrInvalidCapabilities
+	}
 	for _, value := range []struct {
 		name  string
 		value string
@@ -77,8 +81,10 @@ func (c CapabilityAnnouncement) Validate() error {
 			return fmt.Errorf("%w: %s is too long", ErrInvalidCapabilities, value.name)
 		}
 	}
+	if c.PromptOverheadTokens < 0 || c.PromptOverheadTokens > 0 && c.PromptOverheadTokens >= c.ContextWindowTokens {
+		return ErrInvalidCapabilities
+	}
 	if c.ContextWindowTokens < 0 || c.ContextWindowTokens > maxContextWindowTokens ||
-		c.MaxOutputTokens < 0 || c.MaxOutputTokens > maxOutputTokens ||
 		c.MaxPayloadBytes < 0 || c.MaxPayloadBytes > MaxNodePayloadBytes {
 		return ErrInvalidCapabilities
 	}
@@ -103,7 +109,10 @@ func (c CapabilityAnnouncement) SupportsWorkKind(workKind string, schemaVersion 
 	case WorkKindConversationTurn:
 		return schemaVersion == ContextSchemaVersionV1 &&
 			supported(CapabilityConversationContext) && c.SupportsRoles &&
-			c.ContextWindowTokens > 0 && c.MaxOutputTokens > 0 && c.MaxPayloadBytes > 0
+			c.ContextWindowTokens > 0 && c.MaxPayloadBytes > 0
+	case "opaque_conversation_turn":
+		return schemaVersion == 2 && supported("opaque_conversation_v2") && c.SupportsRoles &&
+			c.ContextWindowTokens > 0 && c.MaxPayloadBytes > 0 && len(c.OpaqueSigningKey) == 32
 	default:
 		return false
 	}

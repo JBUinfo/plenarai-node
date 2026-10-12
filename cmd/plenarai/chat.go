@@ -33,11 +33,17 @@ func init() {
 }
 
 func runChat(cmd *cobra.Command, args []string) error {
+	if chatPrivacy == "client_encrypted_v2" {
+		return runOpaqueChat(cmd, args)
+	}
+	if chatPrivacy != "server_readable" {
+		return fmt.Errorf("unknown --privacy mode")
+	}
 	chatMode = strings.ToLower(strings.TrimSpace(chatMode))
 	if chatMode != "directed" && chatMode != "evaluated" {
 		return fmt.Errorf("--mode must be directed or evaluated")
 	}
-	if chatMode == "directed" && strings.TrimSpace(chatNodeID) == "" {
+	if chatConversationID == "" && chatMode == "directed" && strings.TrimSpace(chatNodeID) == "" {
 		return fmt.Errorf("--node-id is required for directed chat")
 	}
 	if chatMode == "evaluated" && strings.TrimSpace(chatNodeID) != "" {
@@ -46,6 +52,20 @@ func runChat(cmd *cobra.Command, args []string) error {
 	conversation, err := loadOrCreateConversation()
 	if err != nil {
 		return err
+	}
+	if chatConversationID != "" {
+		if !cmd.Flags().Changed("mode") && conversation.PreferredMode != "" {
+			chatMode = conversation.PreferredMode
+		}
+		if !cmd.Flags().Changed("node-id") {
+			chatNodeID = conversation.PreferredNodeID
+		}
+		if chatMode == "directed" && chatNodeID == "" {
+			return fmt.Errorf("choose a provider with --node-id")
+		}
+		if (conversation.PreferredMode != "" && chatMode != conversation.PreferredMode) || (conversation.PreferredNodeID != "" && chatNodeID != conversation.PreferredNodeID) {
+			return fmt.Errorf("conversation has a saved provider; use /provider to change it explicitly")
+		}
 	}
 	fmt.Printf("Conversation %s (revision %d). Type /exit to leave.\n", conversation.ID, conversation.Revision)
 	if err := resumePendingTurn(&conversation); err != nil {
@@ -67,6 +87,22 @@ func runChat(cmd *cobra.Command, args []string) error {
 		switch {
 		case trimmed == "/exit" || trimmed == "/quit":
 			return nil
+		case strings.HasPrefix(trimmed, "/provider "):
+			nodeID := strings.TrimSpace(strings.TrimPrefix(trimmed, "/provider "))
+			mode := "directed"
+			if nodeID == "evaluated" {
+				mode = "evaluated"
+				nodeID = ""
+			}
+			updated, err := conversationer.SetProvider(conversation.ID, conversation.Revision, mode, nodeID)
+			if err != nil {
+				fmt.Printf("provider change failed: %v\\n", err)
+				continue
+			}
+			conversation = updated
+			chatMode = mode
+			chatNodeID = nodeID
+			fmt.Printf("Provider preference updated (revision %d).\\n", conversation.Revision)
 		case trimmed == "/new":
 			created, err := conversationer.Create("")
 			if err != nil {

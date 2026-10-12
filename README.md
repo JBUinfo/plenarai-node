@@ -1,11 +1,12 @@
 # PlenarAI CLI
 
-Command-line client for [PlenarAI](https://plenarai.com): ask questions to a network of independently operated AI nodes, or run your own node and earn internal credits by answering or judging. The free beta is open to adults aged 18 or older. There are no payments or cash rewards; credits cannot be withdrawn as money.
+Command-line client for [PlenarAI](https://plenarai.com): chat with AI agents run by independent providers, or run your own node and earn internal credits by answering or judging. The free beta is open to adults aged 18 or older. There are no payments or cash rewards; credits cannot be withdrawn as money.
 
-- **Questioner:** spend free beta credits; eligible nodes may compete and judges score responses. Answers are not guaranteed correct.
-- **Responder:** answer questions with a local model on your own hardware.
+- **Chat:** `plenarai chat --node-id UUID` talks to the provider you choose. By default the history keys stay on your device and the server stores only ciphertext; the chosen provider decrypts the selected context to answer.
+- **Directed questions:** address one provider with `--node-id` (90/10 internal credit allocation, no voting).
+- **Evaluated mode (`--mode evaluated`):** eligible nodes may compete and judges score responses. Answers are not guaranteed correct.
+- **Responder:** answer with a local model on your own hardware.
 - **Judge (`--score-only`):** evaluate anonymised answers without ever responding.
-- **Directed mode:** address one specific node with `--node-id` (95/5 internal credit allocation, no voting).
 
 ## Install
 
@@ -44,11 +45,13 @@ The bundled engine applies the chat template embedded in the model file. Legacy 
 ## Common commands
 
 ```bash
-./plenarai ask "What is the capital of France?"
+./plenarai providers                      # discover providers by seven-day usage
+./plenarai chat --node-id NODE_UUID        # encrypted conversation with one provider
 ./plenarai ask --node-id NODE_UUID "Ask this node directly"
-./plenarai scorer-register   # become a judge (eligibility rules apply)
-./plenarai status            # balance, ELO, stake, earnings
-./plenarai update
+./plenarai provider-profile                # describe your own node to others
+./plenarai scorer-register                 # become a judge (eligibility rules apply)
+./plenarai status                          # balance, stake, earnings
+./plenarai update                          # install the newest signed beta release
 ```
 
 ## Security notes

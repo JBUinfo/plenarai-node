@@ -21,6 +21,7 @@ var httpClient = &http.Client{Timeout: 60 * time.Second}
 
 type Release struct {
 	TagName string  `json:"tag_name"`
+	Draft   bool    `json:"draft"`
 	Assets  []Asset `json:"assets"`
 }
 
@@ -29,9 +30,10 @@ type Asset struct {
 	BrowserDownloadURL string `json:"browser_download_url"`
 }
 
-// LatestRelease fetches the newest published release from GitHub.
+// LatestRelease fetches the highest SemVer release from GitHub. The beta
+// channel publishes prereleases, which /releases/latest never returns.
 func LatestRelease() (*Release, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", config.ReleaseRepo)
+	url := fmt.Sprintf("https://api.github.com/repos/%s/releases?per_page=30", config.ReleaseRepo)
 	resp, err := httpClient.Get(url)
 	if err != nil {
 		return nil, fmt.Errorf("could not reach GitHub: %w", err)
@@ -40,11 +42,31 @@ func LatestRelease() (*Release, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("GitHub returned status %d", resp.StatusCode)
 	}
-	var rel Release
-	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+	var releases []Release
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&releases); err != nil {
 		return nil, err
 	}
-	return &rel, nil
+	rel := newestRelease(releases)
+	if rel == nil {
+		return nil, fmt.Errorf("no published release found")
+	}
+	return rel, nil
+}
+
+// newestRelease ignores drafts and tags that are not valid SemVer.
+func newestRelease(releases []Release) *Release {
+	var best *Release
+	var bestVersion semanticVersion
+	for i := range releases {
+		version, ok := parseSemver(releases[i].TagName)
+		if releases[i].Draft || !ok {
+			continue
+		}
+		if best == nil || compareSemver(version, bestVersion) > 0 {
+			best, bestVersion = &releases[i], version
+		}
+	}
+	return best
 }
 
 // AssetName returns the release asset name for this OS/arch.
@@ -224,7 +246,7 @@ func SelfUpdate() (string, error) {
 		switch a.Name {
 		case assetName:
 			binURL = a.BrowserDownloadURL
-		case "checksums.txt":
+		case "SHA256SUMS.txt", "checksums.txt":
 			sumURL = a.BrowserDownloadURL
 		}
 	}
@@ -232,7 +254,7 @@ func SelfUpdate() (string, error) {
 		return "", fmt.Errorf("release %s has no binary for %s", rel.TagName, assetName)
 	}
 	if sumURL == "" {
-		return "", fmt.Errorf("release %s has no checksums.txt, refusing unverified update", rel.TagName)
+		return "", fmt.Errorf("release %s has no SHA256SUMS.txt, refusing unverified update", rel.TagName)
 	}
 
 	exePath, err := os.Executable()
@@ -318,7 +340,7 @@ func expectedChecksum(sumURL, assetName string) (string, error) {
 	}
 	for _, line := range strings.Split(string(data), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) == 2 && fields[1] == assetName {
+		if len(fields) == 2 && strings.TrimPrefix(fields[1], "*") == assetName {
 			return fields[0], nil
 		}
 	}

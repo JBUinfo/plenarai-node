@@ -26,3 +26,15 @@ func TestIsNewerUsesSemanticVersionOrdering(t *testing.T) {
 		})
 	}
 }
+
+func TestNewestReleaseIncludesPrereleasesAndSkipsDrafts(t *testing.T) {
+	releases := []Release{
+		{TagName: "v0.1.0-beta.2"},
+		{TagName: "v0.1.0-beta.10"},
+		{TagName: "v0.2.0-beta.1", Draft: true},
+		{TagName: "nightly"},
+	}
+	if got := newestRelease(releases); got == nil || got.TagName != "v0.1.0-beta.10" {
+		t.Fatalf("newestRelease = %+v, want v0.1.0-beta.10", got)
+	}
+}

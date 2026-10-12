@@ -32,12 +32,20 @@ type Message struct {
 	Content string `json:"content"`
 }
 
+// Usage is what the local engine measured for one generation. CachedTokens is
+// zero when the engine does not report prompt-cache reuse.
+type Usage struct {
+	PromptTokens     int    `json:"prompt_tokens"`
+	CompletionTokens int    `json:"completion_tokens,omitempty"`
+	CachedTokens     int    `json:"cached_tokens,omitempty"`
+	FinishReason     string `json:"finish_reason,omitempty"`
+}
+
 // GenerationOptions contains bounded generation controls. Zero values leave
 // the engine default in place.
 type GenerationOptions struct {
-	MaxOutputTokens int
-	Temperature     float64
-	TopP            float64
+	Temperature float64
+	TopP        float64
 }
 
 const (
@@ -50,7 +58,6 @@ const (
 	maxChatResponseSize        int64 = 16 << 20
 	DefaultContextWindowTokens       = 4096
 	MaxContextWindowTokens           = 32768
-	DefaultMaxOutputTokens           = 1024
 	MaxConversationMessages          = 128
 )
 
@@ -200,61 +207,69 @@ func (s *Server) Chat(system, user string) (string, error) {
 // ChatMessages sends role-aware messages to llama-server. The GGUF chat
 // template is applied server-side; roles are never flattened into delimiters.
 func (s *Server) ChatMessages(ctx context.Context, messages []Message, options GenerationOptions) (string, error) {
+	text, _, err := s.ChatMessagesWithUsage(ctx, messages, options)
+	return text, err
+}
+
+// ChatMessagesWithUsage also returns the engine's own measurements. PromptTokens
+// comes from the same template/tokenizer preflight that guards the window.
+func (s *Server) ChatMessagesWithUsage(ctx context.Context, messages []Message, options GenerationOptions) (string, Usage, error) {
+	var usage Usage
 	if err := validateMessages(messages, options); err != nil {
-		return "", err
+		return "", usage, err
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if options.MaxOutputTokens > 0 {
-		if err := s.validateContextWindow(ctx, messages, options.MaxOutputTokens); err != nil {
-			return "", err
+	if s.ContextWindowTokens > 0 {
+		prompt, err := s.validateContextWindow(ctx, messages, 1)
+		if err != nil {
+			return "", usage, err
 		}
+		usage.PromptTokens = prompt
 	}
 	requestBody := struct {
 		Messages    []Message `json:"messages"`
 		Stream      bool      `json:"stream"`
 		CachePrompt bool      `json:"cache_prompt"`
-		MaxTokens   int       `json:"max_tokens,omitempty"`
 		Temperature float64   `json:"temperature,omitempty"`
 		TopP        float64   `json:"top_p,omitempty"`
 	}{
 		Messages:    messages,
 		Stream:      false,
 		CachePrompt: true,
-		MaxTokens:   options.MaxOutputTokens,
 		Temperature: options.Temperature,
 		TopP:        options.TopP,
 	}
 	body, err := json.Marshal(requestBody)
 	if err != nil {
-		return "", fmt.Errorf("%w: encode request: %v", ErrGeneration, err)
+		return "", usage, fmt.Errorf("%w: encode request: %v", ErrGeneration, err)
 	}
 
 	requestCtx, cancel := context.WithTimeout(ctx, chatRequestTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(requestCtx, http.MethodPost, s.BaseURL+"/v1/chat/completions", bytes.NewReader(body))
 	if err != nil {
-		return "", fmt.Errorf("%w: create request: %v", ErrGeneration, err)
+		return "", usage, fmt.Errorf("%w: create request: %v", ErrGeneration, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := chatClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("%w: %v", ErrGeneration, err)
+		return "", usage, fmt.Errorf("%w: %v", ErrGeneration, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("%w: llama-server returned status %d", ErrGeneration, resp.StatusCode)
+		return "", usage, fmt.Errorf("%w: llama-server returned status %d", ErrGeneration, resp.StatusCode)
 	}
 	if resp.ContentLength > maxChatResponseSize {
-		return "", fmt.Errorf("%w: response exceeds the %d-byte limit", ErrGeneration, maxChatResponseSize)
+		return "", usage, fmt.Errorf("%w: response exceeds the %d-byte limit", ErrGeneration, maxChatResponseSize)
 	}
 	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, maxChatResponseSize+1))
 	if err != nil {
-		return "", fmt.Errorf("%w: read llama-server response: %v", ErrGeneration, err)
+		return "", usage, fmt.Errorf("%w: read llama-server response: %v", ErrGeneration, err)
 	}
 	if int64(len(responseBody)) > maxChatResponseSize {
-		return "", fmt.Errorf("%w: response exceeds the %d-byte limit", ErrGeneration, maxChatResponseSize)
+		return "", usage, fmt.Errorf("%w: response exceeds the %d-byte limit", ErrGeneration, maxChatResponseSize)
 	}
 
 	var parsed struct {
@@ -262,50 +277,94 @@ func (s *Server) ChatMessages(ctx context.Context, messages []Message, options G
 			Message struct {
 				Content string `json:"content"`
 			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
+		Usage struct {
+			CompletionTokens int `json:"completion_tokens"`
+		} `json:"usage"`
+		// cache_n is reported by recent llama-server builds; absent means zero.
+		Timings struct {
+			CacheN int `json:"cache_n"`
+		} `json:"timings"`
 	}
 	if err := json.Unmarshal(responseBody, &parsed); err != nil {
-		return "", fmt.Errorf("%w: invalid response: %v", ErrGeneration, err)
+		return "", usage, fmt.Errorf("%w: invalid response: %v", ErrGeneration, err)
 	}
 	if len(parsed.Choices) == 0 {
-		return "", fmt.Errorf("%w: llama-server returned no choices", ErrGeneration)
+		return "", usage, fmt.Errorf("%w: llama-server returned no choices", ErrGeneration)
 	}
-	return parsed.Choices[0].Message.Content, nil
+	usage.CompletionTokens = max(0, parsed.Usage.CompletionTokens)
+	usage.CachedTokens = max(0, parsed.Timings.CacheN)
+	usage.FinishReason = parsed.Choices[0].FinishReason
+	if usage.FinishReason != "stop" && usage.FinishReason != "length" {
+		usage.FinishReason = ""
+	}
+	return parsed.Choices[0].Message.Content, usage, nil
 }
+
+// PromptOverheadTokens measures the system prompt plus chat-template framing
+// that this engine adds before any client message.
+func (s *Server) PromptOverheadTokens(system string) (int, error) {
+	n, err := s.countPromptTokens(context.Background(), []Message{{Role: "system", Content: system}, {Role: "user", Content: "x"}})
+	return max(0, n-1), err
+}
+
+// ContextWindowError reports the measured prompt so a client can recalibrate.
+type ContextWindowError struct {
+	PromptTokens, OutputTokens, Window int
+}
+
+func (e *ContextWindowError) Error() string {
+	return fmt.Sprintf("%v: prompt=%d output_reserve=%d window=%d", ErrContextWindowExceeded, e.PromptTokens, e.OutputTokens, e.Window)
+}
+func (e *ContextWindowError) Unwrap() error { return ErrContextWindowExceeded }
 
 // validateContextWindow asks the same local llama-server that will generate the
 // answer to render its chat template and tokenize that rendered prompt. This
 // catches template overhead and tokenizer differences before inference starts.
-func (s *Server) validateContextWindow(ctx context.Context, messages []Message, outputTokens int) error {
+func (s *Server) validateContextWindow(ctx context.Context, messages []Message, outputTokens int) (int, error) {
 	if s.ContextWindowTokens <= 0 || outputTokens < 0 || outputTokens > s.ContextWindowTokens {
-		return ErrContextWindowExceeded
+		return 0, ErrContextWindowExceeded
 	}
+	prompt, err := s.countPromptTokens(ctx, messages)
+	if err != nil {
+		return 0, err
+	}
+	if prompt+outputTokens > s.ContextWindowTokens {
+		return prompt, &ContextWindowError{PromptTokens: prompt, OutputTokens: outputTokens, Window: s.ContextWindowTokens}
+	}
+	return prompt, nil
+}
+
+// countPromptTokens renders messages with the model template and tokenizes the
+// result with the model tokenizer.
+func (s *Server) countPromptTokens(ctx context.Context, messages []Message) (int, error) {
 	preflightCtx, cancel := context.WithTimeout(ctx, inferencePreflightTimeout)
 	defer cancel()
 	promptBody, err := json.Marshal(struct {
 		Messages []Message `json:"messages"`
 	}{Messages: messages})
 	if err != nil {
-		return fmt.Errorf("%w: encode template request: %v", ErrGeneration, err)
+		return 0, fmt.Errorf("%w: encode template request: %v", ErrGeneration, err)
 	}
 	req, err := http.NewRequestWithContext(preflightCtx, http.MethodPost, s.BaseURL+"/apply-template", bytes.NewReader(promptBody))
 	if err != nil {
-		return fmt.Errorf("%w: create template request: %v", ErrGeneration, err)
+		return 0, fmt.Errorf("%w: create template request: %v", ErrGeneration, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := chatClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("%w: apply chat template: %v", ErrGeneration, err)
+		return 0, fmt.Errorf("%w: apply chat template: %v", ErrGeneration, err)
 	}
 	promptResponse, err := readBoundedResponse(resp)
 	if err != nil {
-		return fmt.Errorf("%w: apply chat template: %v", ErrGeneration, err)
+		return 0, fmt.Errorf("%w: apply chat template: %v", ErrGeneration, err)
 	}
 	var rendered struct {
 		Prompt string `json:"prompt"`
 	}
 	if err := json.Unmarshal(promptResponse, &rendered); err != nil || rendered.Prompt == "" {
-		return fmt.Errorf("%w: llama-server returned an invalid chat template", ErrGeneration)
+		return 0, fmt.Errorf("%w: llama-server returned an invalid chat template", ErrGeneration)
 	}
 
 	tokenBody, err := json.Marshal(struct {
@@ -313,31 +372,28 @@ func (s *Server) validateContextWindow(ctx context.Context, messages []Message, 
 		AddSpecial bool   `json:"add_special"`
 	}{Content: rendered.Prompt, AddSpecial: true})
 	if err != nil {
-		return fmt.Errorf("%w: encode tokenize request: %v", ErrGeneration, err)
+		return 0, fmt.Errorf("%w: encode tokenize request: %v", ErrGeneration, err)
 	}
 	tokenReq, err := http.NewRequestWithContext(preflightCtx, http.MethodPost, s.BaseURL+"/tokenize", bytes.NewReader(tokenBody))
 	if err != nil {
-		return fmt.Errorf("%w: create tokenize request: %v", ErrGeneration, err)
+		return 0, fmt.Errorf("%w: create tokenize request: %v", ErrGeneration, err)
 	}
 	tokenReq.Header.Set("Content-Type", "application/json")
 	tokenResp, err := chatClient.Do(tokenReq)
 	if err != nil {
-		return fmt.Errorf("%w: tokenize chat prompt: %v", ErrGeneration, err)
+		return 0, fmt.Errorf("%w: tokenize chat prompt: %v", ErrGeneration, err)
 	}
 	tokenResponse, err := readBoundedResponse(tokenResp)
 	if err != nil {
-		return fmt.Errorf("%w: tokenize chat prompt: %v", ErrGeneration, err)
+		return 0, fmt.Errorf("%w: tokenize chat prompt: %v", ErrGeneration, err)
 	}
 	var tokenized struct {
 		Tokens []int `json:"tokens"`
 	}
 	if err := json.Unmarshal(tokenResponse, &tokenized); err != nil {
-		return fmt.Errorf("%w: invalid tokenizer response: %v", ErrGeneration, err)
+		return 0, fmt.Errorf("%w: invalid tokenizer response: %v", ErrGeneration, err)
 	}
-	if len(tokenized.Tokens)+outputTokens > s.ContextWindowTokens {
-		return fmt.Errorf("%w: prompt=%d output_reserve=%d window=%d", ErrContextWindowExceeded, len(tokenized.Tokens), outputTokens, s.ContextWindowTokens)
-	}
-	return nil
+	return len(tokenized.Tokens), nil
 }
 
 func readBoundedResponse(resp *http.Response) ([]byte, error) {
@@ -360,12 +416,10 @@ func readBoundedResponse(resp *http.Response) ([]byte, error) {
 
 const (
 	maxChatRequestBytes = 1 << 20
-	maxGenerationTokens = 1 << 20
 )
 
 func validateMessages(messages []Message, options GenerationOptions) error {
 	if len(messages) == 0 || len(messages) > MaxConversationMessages ||
-		options.MaxOutputTokens < 0 || options.MaxOutputTokens > maxGenerationTokens ||
 		options.Temperature < 0 || options.Temperature > 2 ||
 		options.TopP < 0 || options.TopP > 1 {
 		return ErrInvalidMessages

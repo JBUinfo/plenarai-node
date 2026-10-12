@@ -2,6 +2,7 @@ package node
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +21,7 @@ import (
 	"github.com/plenarai/cli/internal/config"
 	"github.com/plenarai/cli/internal/crypto"
 	"github.com/plenarai/cli/internal/inference"
+	"github.com/plenarai/cli/internal/opaque"
 	"github.com/plenarai/cli/internal/securework"
 	"github.com/plenarai/cli/internal/security"
 	"github.com/plenarai/cli/internal/update"
@@ -32,7 +34,6 @@ type Config struct {
 	Model               string
 	OllamaURL           string
 	ModelPath           string // custom GGUF; when set, the bundled llama-server is used
-	MaxOutputTokens     int    // local llama.cpp generation cap; zero uses the default
 	ContextWindowTokens int    // local llama.cpp context window; zero uses the default
 	ScoreOnly           bool   // judge answers but never respond to questions
 }
@@ -61,12 +62,7 @@ const (
 )
 
 func Run(cfg Config) error {
-	if cfg.MaxOutputTokens == 0 {
-		cfg.MaxOutputTokens = inference.DefaultMaxOutputTokens
-	}
-	if cfg.MaxOutputTokens < 1 || cfg.MaxOutputTokens > inference.DefaultMaxOutputTokens {
-		return fmt.Errorf("max-output-tokens must be between 1 and %d", inference.DefaultMaxOutputTokens)
-	}
+	// Generation ends at EOS or the model's context boundary, without a platform token cap.
 	if cfg.ContextWindowTokens == 0 {
 		cfg.ContextWindowTokens = inference.DefaultContextWindowTokens
 	}
@@ -114,10 +110,10 @@ func Run(cfg Config) error {
 			cfg.ModelPath = saved
 		}
 	}
-	if cfg.ModelPath == "" && (cfg.MaxOutputTokens != inference.DefaultMaxOutputTokens || cfg.ContextWindowTokens != inference.DefaultContextWindowTokens) {
+	if cfg.ModelPath == "" && cfg.ContextWindowTokens != inference.DefaultContextWindowTokens {
 		return fmt.Errorf("generation limits require a local GGUF model")
 	}
-	eng := &engine{model: cfg.Model, ollamaURL: cfg.OllamaURL, maxOutputTokens: cfg.MaxOutputTokens}
+	eng := &engine{model: cfg.Model, ollamaURL: cfg.OllamaURL}
 	if cfg.ModelPath != "" {
 		serverBin := viper.GetString("llama.server_bin")
 		if serverBin == "" {
@@ -159,6 +155,17 @@ func Run(cfg Config) error {
 		contextWindowTokens = eng.llama.ContextWindowTokens
 	}
 	capabilities := nodeCapabilities(displayModel, cfg, contextWindowTokens)
+	if eng.llama != nil && capabilities.ContextWindowTokens > 0 {
+		// Encrypted-chat clients budget with this; the tokenizer still decides.
+		if overhead, e := eng.llama.PromptOverheadTokens(promptTemplate); e == nil && overhead < capabilities.ContextWindowTokens {
+			capabilities.PromptOverheadTokens = overhead
+		}
+	}
+	if cfg.ModelPath != "" && !cfg.ScoreOnly {
+		capabilities.Capabilities = append(capabilities.Capabilities, opaque.Capability)
+		capabilities.OpaqueSigningKey = []byte(securework.SigningKey(privKey.Bytes()).Public().(ed25519.PublicKey))
+		fmt.Printf("Provider identity fingerprint: %s\\n", opaque.Fingerprint(privKey.PublicKey().Bytes(), capabilities.OpaqueSigningKey))
+	}
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
@@ -258,7 +265,6 @@ func nodeCapabilities(modelName string, cfg Config, contextWindowTokens int) sec
 		capabilities.Capabilities = append(capabilities.Capabilities, securework.CapabilityConversationContext)
 		capabilities.Template = "chat-v1"
 		capabilities.ContextWindowTokens = contextWindowTokens
-		capabilities.MaxOutputTokens = cfg.MaxOutputTokens
 		capabilities.SupportsRoles = true
 	}
 	return capabilities
@@ -350,7 +356,7 @@ func pumpMessages(conn *SafeConn, questionJobs, scoreJobs chan json.RawMessage) 
 		}
 
 		switch msg.Type {
-		case "question":
+		case "question", "opaque_question":
 			questionJobs <- msg.Data
 		case "score_request":
 			scoreJobs <- msg.Data

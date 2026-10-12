@@ -43,6 +43,9 @@ func Login(email, password string) (*TokenPair, error) {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return nil, fmt.Errorf("too many requests or failed attempts; wait up to 15 minutes and try again")
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("login failed (status %d)", resp.StatusCode)
 	}
@@ -187,6 +190,14 @@ func LoadConfig() {
 // read or write. The write path also tightens permissions on existing objects;
 // this does not configure platform-specific ACLs on Windows.
 func configPath(prepareForWrite bool) (string, error) {
+	return SecretPath(configFileName, prepareForWrite)
+}
+
+// SecretPath applies the same directory, symlink and native ACL checks as tokens.
+func SecretPath(name string, prepareForWrite bool) (string, error) {
+	if filepath.Base(name) != name || name == "." || name == "" {
+		return "", fmt.Errorf("invalid secret filename")
+	}
 	dir := ConfigDir()
 	if err := validateConfigDirForSecrets(dir); err != nil {
 		return "", err
@@ -223,7 +234,7 @@ func configPath(prepareForWrite bool) (string, error) {
 		return "", fmt.Errorf("secure config directory: %w", err)
 	}
 
-	path := filepath.Join(dir, configFileName)
+	path := filepath.Join(dir, name)
 	fileInfo, err := os.Lstat(path)
 	if err == nil {
 		if fileInfo.Mode()&os.ModeSymlink != 0 {
@@ -244,6 +255,21 @@ func configPath(prepareForWrite bool) (string, error) {
 		return "", err
 	}
 	return path, nil
+}
+
+// SecureSecretFile refuses links/special files and applies native ACLs.
+func SecureSecretFile(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("secret must be a regular file")
+	}
+	if err = os.Chmod(path, 0600); err != nil {
+		return err
+	}
+	return secureNativeConfigPermissions(path, false)
 }
 
 func validateConfigDirForSecrets(dir string) error {

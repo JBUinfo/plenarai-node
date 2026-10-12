@@ -8,6 +8,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/plenarai/cli/internal/opaque"
 	"github.com/plenarai/cli/internal/securework"
 	"github.com/plenarai/cli/internal/secureworker"
 	"github.com/plenarai/cli/logger"
@@ -24,6 +25,21 @@ func handleQuestion(conn *SafeConn, privKey *ecdh.PrivateKey, rawData json.RawMe
 		return
 	}
 	var jobID string
+	if metadata.WorkKind == opaque.WorkKind {
+		result, e := secureworker.ProcessOpaque(context.Background(), privKey, rawData, promptTemplate, eng.completeMessagesWithUsage)
+		if e != nil {
+			logger.Log.Warn("encrypted conversation job rejected")
+			return
+		}
+		data, e := json.Marshal(map[string]any{"type": "opaque_response", "data": result})
+		if e == nil {
+			e = conn.WriteMessage(websocket.TextMessage, data)
+		}
+		if e != nil {
+			logger.Log.Warn("encrypted conversation relay failed")
+		}
+		return
+	}
 	var envelope securework.Envelope
 	var err error
 	if metadata.WorkKind == securework.WorkKindConversationTurn {

@@ -23,8 +23,12 @@ type QuestionResult struct {
 	Score  float64 `json:"score"`
 }
 
-func Ask(question, nodeID string) (*AskResponse, error) {
-	payload := map[string]string{"question": question}
+func Ask(question, nodeID string, costs ...float64) (*AskResponse, error) {
+	cost := 1.0
+	if len(costs) > 0 {
+		cost = costs[0]
+	}
+	payload := map[string]interface{}{"question": question, "cost": cost}
 	if nodeID != "" {
 		payload["target_node_id"] = nodeID
 	}

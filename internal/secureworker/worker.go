@@ -227,7 +227,7 @@ func processConversation(ctx context.Context, privKey *ecdh.PrivateKey, raw json
 
 	contextDigest := sha256.Sum256(contextBytes)
 	messages := conversationMessages(bundle, promptTemplate)
-	answer, err := complete(ctx, messages, inference.GenerationOptions{MaxOutputTokens: bundle.BudgetMetadata.OutputReserveTokens})
+	answer, err := complete(ctx, messages, inference.GenerationOptions{})
 	failureCode := ""
 	if err != nil {
 		failureCode = "inference_failed"
@@ -431,7 +431,7 @@ func evaluate(complete Complete, question, answer string) scoreEntry {
 func evaluateConversation(ctx context.Context, complete CompleteChat, bundle securework.ContextBundle, answer string) scoreEntry {
 	messages := conversationMessages(bundle, judgeSystemPrompt)
 	messages = append(messages, inference.Message{Role: "user", Content: fmt.Sprintf(conversationScoringPrompt, answer)})
-	reply, err := complete(ctx, messages, inference.GenerationOptions{MaxOutputTokens: 256})
+	reply, err := complete(ctx, messages, inference.GenerationOptions{})
 	if err != nil {
 		return scoreEntry{Abstained: true, Reason: "judge_inference_error"}
 	}

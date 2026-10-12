@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -19,11 +20,14 @@ import (
 )
 
 type Conversation struct {
-	ID             string  `json:"id"`
-	Revision       int64   `json:"revision"`
-	NextMessageSeq int64   `json:"next_message_seq"`
-	ActiveTurnID   *string `json:"active_turn_id,omitempty"`
-	Title          string  `json:"title,omitempty"`
+	PreferredMode          string  `json:"preferred_mode,omitempty"`
+	PreferredNodeID        string  `json:"preferred_node_id,omitempty"`
+	PreferredModelRevision string  `json:"preferred_model_revision,omitempty"`
+	ID                     string  `json:"id"`
+	Revision               int64   `json:"revision"`
+	NextMessageSeq         int64   `json:"next_message_seq"`
+	ActiveTurnID           *string `json:"active_turn_id,omitempty"`
+	Title                  string  `json:"title,omitempty"`
 }
 
 type Message struct {
@@ -450,6 +454,11 @@ func pendingTurnPath(conversationID string, prepare bool) (string, error) {
 }
 
 func request(method, path string, body interface{}, headers map[string]string, output interface{}, expected ...int) error {
+	return Request(method, path, body, headers, output, expected...)
+}
+
+// Request is the bounded authenticated transport shared by both conversation versions.
+func Request(method, path string, body interface{}, headers map[string]string, output interface{}, expected ...int) error {
 	var payload []byte
 	var err error
 	if body != nil {
@@ -500,5 +509,11 @@ func request(method, path string, body interface{}, headers map[string]string, o
 	if output == nil || resp.StatusCode == http.StatusNoContent || resp.ContentLength == 0 {
 		return nil
 	}
-	return json.NewDecoder(resp.Body).Decode(output)
+	return json.NewDecoder(io.LimitReader(resp.Body, 32<<20)).Decode(output)
+}
+
+func SetProvider(conversationID string, revision int64, mode, nodeID string) (*Conversation, error) {
+	var result Conversation
+	err := request(http.MethodPut, "/v0/conversations/"+url.PathEscape(conversationID)+"/provider", map[string]interface{}{"expected_revision": revision, "mode": mode, "target_node_id": nodeID}, nil, &result, http.StatusOK)
+	return &result, err
 }

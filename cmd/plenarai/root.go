@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -34,7 +36,7 @@ var verbose bool
 
 var rootCmd = &cobra.Command{
 	Use:   "plenarai",
-	Short: "PlenarAI - Distributed AI Consensus Network",
+	Short: "PlenarAI - Independent AI Marketplace",
 	Long:  "CLI client for the PlenarAI platform. Ask questions or run as a node to earn credits.",
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		logger.Init(verbose)
@@ -50,7 +52,6 @@ var (
 	promptFile          string
 	modelName           string
 	modelPath           string
-	maxOutputTokens     int
 	contextWindowTokens int
 	scoreOnly           bool
 	minNodeCost         float64
@@ -75,12 +76,13 @@ func init() {
 	rootCmd.AddCommand(scorerRegisterCmd)
 	rootCmd.AddCommand(versionCmd)
 	rootCmd.AddCommand(updateCmd)
-	askCmd.Flags().StringVar(&askNodeID, "node-id", "", "send only to this node UUID, bypassing voting and judging")
+	askCmd.Flags().StringVar(&askNodeID, "node-id", "", "send only to this provider UUID")
+	askCmd.Flags().Float64Var(&askCost, "cost", 1, "question price in credits; must meet the chosen provider minimum")
+	askCmd.Flags().StringVar(&askMode, "mode", "directed", "directed (requires --node-id) or evaluated (explicit optional evaluation)")
 
 	nodeCmd.Flags().StringVarP(&promptFile, "prompt", "p", "", "path to custom prompt file")
 	nodeCmd.Flags().StringVarP(&modelName, "model", "m", "llama3", "ollama model to use (legacy --engine ollama)")
 	nodeCmd.Flags().StringVar(&modelPath, "model-path", "", "path to a custom GGUF model file (uses the bundled llama.cpp engine)")
-	nodeCmd.Flags().IntVar(&maxOutputTokens, "max-output-tokens", inference.DefaultMaxOutputTokens, "maximum generated tokens per local llama.cpp response (try 256 for small models)")
 	nodeCmd.Flags().IntVar(&contextWindowTokens, "context-window-tokens", inference.DefaultContextWindowTokens, "local llama.cpp context window (4096-32768; evaluated chat may need 8192)")
 	nodeCmd.Flags().BoolVar(&scoreOnly, "score-only", false, "run as judge only: score other nodes' answers, never respond")
 	nodeCmd.Flags().Float64Var(&minNodeCost, "min-cost", 0, "minimum question price this node will answer")
@@ -134,9 +136,6 @@ var nodeCmd = &cobra.Command{
 	Use:   "node",
 	Short: "Start as a responder node and earn credits",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if maxOutputTokens < 1 || maxOutputTokens > inference.DefaultMaxOutputTokens {
-			return fmt.Errorf("max-output-tokens must be between 1 and %d", inference.DefaultMaxOutputTokens)
-		}
 		if contextWindowTokens < inference.DefaultContextWindowTokens || contextWindowTokens > inference.MaxContextWindowTokens {
 			return fmt.Errorf("context-window-tokens must be between %d and %d", inference.DefaultContextWindowTokens, inference.MaxContextWindowTokens)
 		}
@@ -160,7 +159,7 @@ var nodeCmd = &cobra.Command{
 				finalModelPath = saved
 			}
 		}
-		if finalModelPath == "" && (maxOutputTokens != inference.DefaultMaxOutputTokens || contextWindowTokens != inference.DefaultContextWindowTokens) {
+		if finalModelPath == "" && contextWindowTokens != inference.DefaultContextWindowTokens {
 			return fmt.Errorf("generation limits require a local GGUF model")
 		}
 
@@ -177,7 +176,6 @@ var nodeCmd = &cobra.Command{
 			Model:               finalModel,
 			OllamaURL:           finalOllamaURL,
 			ModelPath:           finalModelPath,
-			MaxOutputTokens:     maxOutputTokens,
 			ContextWindowTokens: contextWindowTokens,
 			ScoreOnly:           scoreOnly,
 		})
@@ -220,20 +218,17 @@ var scorerRegisterCmd = &cobra.Command{
 
 		// Show requirements vs current status when the server exposes them.
 		var reqs struct {
-			MinELO      float64 `json:"min_elo"`
 			MinAnswered int     `json:"min_answered"`
 			MinStake    float64 `json:"min_stake"`
 		}
 		var profile struct {
 			StakeAmount   float64 `json:"stake_amount"`
-			EloRating     float64 `json:"elo_rating"`
 			TotalAnswered int     `json:"total_answered"`
 		}
 		haveReqs := apiGet(header, "/v0/node/scorer-requirements", &reqs) == nil
 		haveProfile := apiGet(header, "/v0/node/stake", &profile) == nil
 		if haveReqs && haveProfile {
 			fmt.Println("Scorer requirements:")
-			printRequirement("ELO", profile.EloRating, reqs.MinELO)
 			printRequirement("Answered questions", float64(profile.TotalAnswered), float64(reqs.MinAnswered))
 			printRequirement("Stake (credits)", profile.StakeAmount, reqs.MinStake)
 			fmt.Println()
@@ -267,14 +262,23 @@ func printRequirement(name string, current, required float64) {
 
 var askCmd = &cobra.Command{
 	Use:   "ask [question]",
-	Short: "Submit a question and spend credits",
+	Short: "Ask a chosen provider, or opt into evaluated mode",
 	Args:  cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if askMode != "directed" && askMode != "evaluated" {
+			return fmt.Errorf("--mode must be directed or evaluated")
+		}
+		if askMode == "directed" && askNodeID == "" {
+			return fmt.Errorf("choose a provider with --node-id; discover providers with plenarai providers, or explicitly use --mode evaluated")
+		}
+		if askMode == "evaluated" && askNodeID != "" {
+			return fmt.Errorf("--node-id cannot be combined with --mode evaluated")
+		}
 		question := strings.Join(args, " ")
 
 		fmt.Println("Note: responder nodes read your question to answer it (they never learn who asked).")
 		fmt.Println("Avoid including personal data or secrets in the question text.")
-		result, err := questioner.Ask(question, askNodeID)
+		result, err := questioner.Ask(question, askNodeID, askCost)
 		if err != nil {
 			return fmt.Errorf("ask failed: %w", err)
 		}
@@ -307,6 +311,8 @@ var askCmd = &cobra.Command{
 }
 
 var askNodeID string
+var askMode string
+var askCost float64
 
 var logoutCmd = &cobra.Command{
 	Use:   "logout",
@@ -328,6 +334,9 @@ var registerCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		if utf8.RuneCountInString(password) < 8 {
+			return fmt.Errorf("password must be at least 8 characters")
+		}
 
 		fmt.Println("Read the terms and privacy notice at https://plenarai.com/terms and https://plenarai.com/privacy")
 		fmt.Print("I confirm I am at least 18 years old (yes/no): ")
@@ -346,6 +355,12 @@ var registerCmd = &cobra.Command{
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusCreated {
+			var failure struct {
+				Error string `json:"error"`
+			}
+			if json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&failure) == nil && failure.Error != "" {
+				return fmt.Errorf("registration failed (status %d): %s", resp.StatusCode, failure.Error)
+			}
 			return fmt.Errorf("registration failed (status %d)", resp.StatusCode)
 		}
 
@@ -388,7 +403,6 @@ var statusCmd = &cobra.Command{
 			StakeAmount   float64 `json:"stake_amount"`
 			IsSuspended   bool    `json:"is_suspended"`
 			Earnings      float64 `json:"earnings"`
-			EloRating     float64 `json:"elo_rating"`
 			TotalAnswered int     `json:"total_answered"`
 			TotalWon      int     `json:"total_won"`
 			IsScorer      bool    `json:"is_scorer"`
@@ -399,7 +413,6 @@ var statusCmd = &cobra.Command{
 				fmt.Print(" (SUSPENDED)")
 			}
 			fmt.Println()
-			fmt.Printf("ELO:     %.0f\n", stake.EloRating)
 			fmt.Printf("Answered: %d   Won: %d\n", stake.TotalAnswered, stake.TotalWon)
 			fmt.Printf("Earnings: %.4f credits\n", stake.Earnings)
 			scorerState := "no"

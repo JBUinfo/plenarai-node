@@ -19,11 +19,10 @@ import (
 // or through a legacy local Ollama instance. Question content stays on the
 // machine in both cases.
 type engine struct {
-	llama           *inference.Server
-	model           string // ollama model tag (legacy path)
-	ollamaURL       string
-	displayName     string
-	maxOutputTokens int
+	llama       *inference.Server
+	model       string // ollama model tag (legacy path)
+	ollamaURL   string
+	displayName string
 }
 
 func (e *engine) complete(system, user string) string {
@@ -40,7 +39,7 @@ func (e *engine) completeSafe(system, user string) (string, error) {
 		return e.llama.ChatMessages(context.Background(), []inference.Message{
 			{Role: "system", Content: system},
 			{Role: "user", Content: user},
-		}, inference.GenerationOptions{MaxOutputTokens: e.maxOutputTokens})
+		}, inference.GenerationOptions{})
 	}
 	return e.queryOllamaSafe(system + "\n\n" + user)
 }
@@ -52,10 +51,16 @@ func (e *engine) completeMessages(ctx context.Context, messages []inference.Mess
 	if e.llama == nil {
 		return "", inference.ErrRoleAwareChatUnsupported
 	}
-	if e.maxOutputTokens > 0 && (options.MaxOutputTokens <= 0 || options.MaxOutputTokens > e.maxOutputTokens) {
-		options.MaxOutputTokens = e.maxOutputTokens
-	}
 	return e.llama.ChatMessages(ctx, messages, options)
+}
+
+// completeMessagesWithUsage is used by encrypted chat, whose client calibrates
+// its token estimate from the engine's own measurements.
+func (e *engine) completeMessagesWithUsage(ctx context.Context, messages []inference.Message, options inference.GenerationOptions) (string, inference.Usage, error) {
+	if e.llama == nil {
+		return "", inference.Usage{}, inference.ErrRoleAwareChatUnsupported
+	}
+	return e.llama.ChatMessagesWithUsage(ctx, messages, options)
 }
 
 // queryOllamaSafe is the legacy single-prompt Ollama path (/api/generate).
