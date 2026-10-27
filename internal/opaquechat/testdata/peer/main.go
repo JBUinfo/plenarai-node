@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"github.com/plenarai/cli/internal/auth"
 	"github.com/plenarai/cli/internal/config"
+	"github.com/plenarai/cli/internal/httpgzip"
 	"github.com/plenarai/cli/internal/inference"
 	"github.com/plenarai/cli/internal/opaquechat"
 	"github.com/plenarai/cli/internal/secureworker"
@@ -47,6 +48,7 @@ func main() {
 		return
 	}
 	config.ServerURL = in.Server
+	httpgzip.Install(in.Server) // as Execute does in the shipped CLI
 	if err := auth.SaveTokens(&auth.TokenPair{AccessToken: in.Token, RefreshToken: "test-only"}); err != nil {
 		panic(err)
 	}

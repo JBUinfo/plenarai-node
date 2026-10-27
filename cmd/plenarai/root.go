@@ -21,6 +21,7 @@ import (
 
 	"github.com/plenarai/cli/internal/auth"
 	"github.com/plenarai/cli/internal/config"
+	"github.com/plenarai/cli/internal/httpgzip"
 	"github.com/plenarai/cli/internal/inference"
 	"github.com/plenarai/cli/internal/llamacpp"
 	"github.com/plenarai/cli/internal/node"
@@ -672,6 +673,7 @@ var updateCmd = &cobra.Command{
 }
 
 func Execute() {
+	httpgzip.Install(config.ServerURL)
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}

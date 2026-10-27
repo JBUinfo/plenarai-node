@@ -5,6 +5,7 @@ import (
 	"crypto/ecdh"
 	"crypto/ed25519"
 	"crypto/rand"
+	"strings"
 	"testing"
 	"time"
 )
@@ -81,5 +82,37 @@ func TestClientNodeOnlyAndTranscriptBinding(t *testing.T) {
 	}
 	if bytes.Contains(req.Ciphertext, []byte("CONTEXT-CANARY")) {
 		t.Fatal("plaintext in ciphertext")
+	}
+}
+
+func TestCompressedContextRoundTripAndLimits(t *testing.T) {
+	h, node, ephemeral, client, _ := fixture(t)
+	master, _ := RandomKey()
+	record, _ := SealRecord(master, "message", h.Canonical(), []byte("record"))
+	plain := []byte(`{"messages":[{"role":"user","content":"` + strings.Repeat("hola mundo ", 4000) + `"}]}`)
+	compressed, err := CompressContext(plain)
+	if err != nil || len(compressed) >= len(plain)/10 {
+		t.Fatalf("compress: %v, %d of %d bytes", err, len(compressed), len(plain))
+	}
+	req, err := SealRequest(h, record, compressed, ephemeral, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _, err := OpenRequest(req, node)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded, err := DecodeContext(body); err != nil || !bytes.Equal(decoded, plain) {
+		t.Fatalf("decode: %v", err)
+	}
+	if same, err := DecodeContext(plain); err != nil || &same[0] != &plain[0] {
+		t.Fatal("plain JSON contexts must pass through unchanged")
+	}
+	bomb, _ := CompressContext(bytes.Repeat([]byte{'a'}, MaxContextPlaintext+1))
+	if _, err := DecodeContext(bomb); err == nil {
+		t.Fatal("oversized decompressed context accepted")
+	}
+	if _, err := DecodeContext([]byte{0x1f, 0x8b, 0, 1}); err == nil {
+		t.Fatal("corrupt gzip context accepted")
 	}
 }

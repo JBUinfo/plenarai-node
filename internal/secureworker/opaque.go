@@ -56,8 +56,15 @@ func processOpaque(ctx context.Context, key *ecdh.PrivateKey, raw json.RawMessag
 	fail := func(code string) (opaque.Response, error) {
 		return opaque.SealResponse(r, shared, []byte("{}"), "failed", code, signer)
 	}
+	plain, err := opaque.DecodeContext(body)
+	if err != nil {
+		return fail("invalid_context")
+	}
+	if len(plain) > 0 && len(body) > 0 && &plain[0] != &body[0] {
+		defer opaque.Zero(plain)
+	}
 	var input OpaqueContext
-	if json.Unmarshal(body, &input) != nil || len(input.Messages) == 0 || len(input.Messages) > inference.MaxConversationMessages-1 {
+	if json.Unmarshal(plain, &input) != nil || len(input.Messages) == 0 || len(input.Messages) > inference.MaxConversationMessages-1 {
 		return fail("invalid_context")
 	}
 	total := len(prompt)

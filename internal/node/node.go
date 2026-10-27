@@ -162,7 +162,7 @@ func Run(cfg Config) error {
 		}
 	}
 	if cfg.ModelPath != "" && !cfg.ScoreOnly {
-		capabilities.Capabilities = append(capabilities.Capabilities, opaque.Capability)
+		capabilities.Capabilities = append(capabilities.Capabilities, opaque.Capability, opaque.ContextGzipCapability)
 		capabilities.OpaqueSigningKey = []byte(securework.SigningKey(privKey.Bytes()).Public().(ed25519.PublicKey))
 		fmt.Printf("Provider identity fingerprint: %s\\n", opaque.Fingerprint(privKey.PublicKey().Bytes(), capabilities.OpaqueSigningKey))
 	}

@@ -5,6 +5,7 @@ package opaque
 
 import (
 	"bytes"
+	"compress/gzip"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdh"
@@ -16,6 +17,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"time"
 )
@@ -30,6 +32,11 @@ const (
 	MaxAnswer     = 65536
 	Lifetime      = 180 * time.Second
 	ClockSkew     = 30 * time.Second
+
+	// ContextGzipCapability marks nodes that accept gzip-compressed contexts;
+	// MaxContextPlaintext bounds the decompressed JSON.
+	ContextGzipCapability = "opaque_context_gzip"
+	MaxContextPlaintext   = 2 << 20
 )
 
 var ErrEnvelope = errors.New("invalid opaque conversation envelope")
@@ -374,4 +381,36 @@ func (c Create) Verify() error {
 		return ErrEnvelope
 	}
 	return nil
+}
+
+// CompressContext gzips a context before SealRequest. Send it only to nodes
+// that announce ContextGzipCapability; the AEAD still covers every byte.
+func CompressContext(plain []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	w, err := gzip.NewWriterLevel(&buf, gzip.BestCompression)
+	if err != nil {
+		return nil, err
+	}
+	if _, err = w.Write(plain); err == nil {
+		err = w.Close()
+	}
+	return buf.Bytes(), err
+}
+
+// DecodeContext returns the JSON of an opened context. Contexts are JSON
+// objects that start with '{', so the gzip magic bytes are unambiguous.
+func DecodeContext(body []byte) ([]byte, error) {
+	if len(body) < 2 || body[0] != 0x1f || body[1] != 0x8b {
+		return body, nil
+	}
+	r, err := gzip.NewReader(bytes.NewReader(body))
+	if err != nil {
+		return nil, ErrEnvelope
+	}
+	out, err := io.ReadAll(io.LimitReader(r, MaxContextPlaintext+1))
+	if err != nil || len(out) > MaxContextPlaintext {
+		Zero(out)
+		return nil, ErrEnvelope
+	}
+	return out, nil
 }

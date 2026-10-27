@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"slices"
 	"strconv"
 	"time"
 
@@ -27,7 +28,14 @@ type Provider struct {
 	ContextWindowTokens  int     `json:"context_window_tokens"`
 	PromptOverheadTokens int     `json:"prompt_overhead_tokens"`
 	MinCost              float64 `json:"min_cost"`
+	// ContextEncodings lists what the node can decode besides plain JSON.
+	ContextEncodings []string `json:"context_encodings,omitempty"`
 }
+
+func (p *Provider) acceptsGzipContext() bool {
+	return p != nil && slices.Contains(p.ContextEncodings, "gzip")
+}
+
 type Conversation struct {
 	Create       opaque.Create `json:"create"`
 	Revision     int64         `json:"revision"`
@@ -649,9 +657,18 @@ func (s *Session) sendRecord(rec record, messages []inference.Message, b Budget,
 	if err != nil {
 		return "", err
 	}
+	// Compressing before encryption shrinks the upload, what the server
+	// stores and every later history download, which repeats each context.
+	context := payload
+	if s.provider.acceptsGzipContext() {
+		if compressed, err := opaque.CompressContext(payload); err == nil && len(compressed) < len(payload) {
+			defer opaque.Zero(compressed)
+			context = compressed
+		}
+	}
 	signer := ed25519.NewKeyFromSeed(s.Entry.SigningSeed)
 	defer opaque.Zero(signer)
-	request, err := opaque.SealRequest(h, encryptedRecord, payload, ephemeral, signer)
+	request, err := opaque.SealRequest(h, encryptedRecord, context, ephemeral, signer)
 	if err != nil {
 		return "", err
 	}
